@@ -46,6 +46,11 @@ pub struct SessionResponse {
     pub notify_on_waiting: Option<bool>,
     pub notify_on_idle: Option<bool>,
     pub notify_on_error: Option<bool>,
+    /// True when this session uses ACP cockpit rendering instead of a
+    /// tmux-backed PTY. The web dashboard branches on this to pick
+    /// between the cockpit panels and the terminal view.
+    #[cfg(feature = "serve")]
+    pub cockpit_mode: bool,
     /// True when the session is a Claude Code session AND the user has
     /// enabled Claude's fullscreen renderer (`tui: "fullscreen"` in
     /// `~/.claude/settings.json`). The web client uses this to skip
@@ -112,6 +117,8 @@ impl SessionResponse {
             notify_on_waiting: inst.notify_on_waiting,
             notify_on_idle: inst.notify_on_idle,
             notify_on_error: inst.notify_on_error,
+            #[cfg(feature = "serve")]
+            cockpit_mode: inst.cockpit_mode,
             claude_fullscreen: claude_fullscreen && inst.tool == "claude",
             workspace_repos: inst
                 .workspace_info
@@ -428,6 +435,34 @@ pub async fn delete_session(
         }
     }
 
+    // Tear down the cockpit worker FIRST so the ACP subprocess + its
+    // claude-agent-acp child don't leak past the session delete. The
+    // supervisor's shutdown is best-effort: sessions without a worker
+    // (tmux-mode, or cockpit sessions whose worker never spawned)
+    // return UnknownSession, which we ignore.
+    #[cfg(feature = "serve")]
+    if instance.cockpit_mode {
+        match state.cockpit_supervisor.shutdown(&id).await {
+            Ok(()) | Err(crate::cockpit::supervisor::SupervisorError::UnknownSession(_)) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "cockpit.supervisor",
+                    session = %id,
+                    "shutdown during delete failed: {e}"
+                );
+            }
+        }
+        // Drop the per-session replay buffer + seq counter too:
+        // keeping them would leak a few MB per deleted session and
+        // serve no purpose since the session is gone. Forgetting the
+        // counter also means a recreated session with the same id
+        // (rare, but possible) starts cleanly from seq=1.
+        state.cockpit_supervisor.forget_session(&id);
+        if let Ok(mut guard) = state.cockpit_replay.lock() {
+            guard.remove(&id);
+        }
+    }
+
     // Run deletion on a blocking thread (may do git/docker/tmux operations)
     let deletion_id = id.clone();
     let deletion_result = tokio::task::spawn_blocking(move || {
@@ -524,6 +559,23 @@ pub struct CreateSessionBody {
     #[serde(default)]
     pub custom_instruction: Option<String>,
     pub profile: Option<String>,
+    /// Whether the new session should run in cockpit mode. The
+    /// bundled wizard always sends an explicit value (true for ACP-
+    /// capable tools when the server has `AOE_EXPERIMENTAL_COCKPIT`
+    /// set, false otherwise); other API callers may omit the field,
+    /// in which case it defaults to false. Either way the value is
+    /// re-gated by `allow_cockpit` below before being persisted, so
+    /// a tampered request can't escalate cockpit on past the env-
+    /// var, master-switch, or no-cockpit gates.
+    #[cfg(feature = "serve")]
+    #[serde(default)]
+    pub cockpit_mode: bool,
+    #[cfg(feature = "serve")]
+    #[serde(default)]
+    pub cockpit_agent: Option<String>,
+    #[cfg(feature = "serve")]
+    #[serde(default)]
+    pub cockpit_model: Option<String>,
 }
 
 pub async fn create_session(
@@ -606,6 +658,12 @@ pub async fn create_session(
         .collect();
     drop(instances);
 
+    // Snapshot the master-kill flag before moving into spawn_blocking
+    // so the post-spawn write path (which still needs `state`) keeps
+    // its handle.
+    #[cfg(feature = "serve")]
+    let cockpit_master_enabled = state.cockpit_master_enabled;
+
     let result = tokio::task::spawn_blocking(move || {
         use crate::session::builder::{self, InstanceParams};
         use crate::session::Config;
@@ -672,14 +730,36 @@ pub async fn create_session(
             }
         }
 
+        // Apply cockpit fields from the request body. cockpit_mode is
+        // silently downgraded to tmux when either gate says no:
+        // `cockpit.enabled = false` in config.toml (persistent master),
+        // or `AOE_EXPERIMENTAL_COCKPIT` not set (per-process opt-in for
+        // new sessions).
+        #[cfg(feature = "serve")]
+        {
+            let allow_cockpit = cockpit_master_enabled && crate::cockpit::experimental_enabled();
+            instance.cockpit_mode = body.cockpit_mode && allow_cockpit;
+            instance.cockpit_agent = body.cockpit_agent;
+            instance.cockpit_model = body.cockpit_model;
+        }
+
         // Save to disk
         let storage = Storage::new(&profile)?;
         let mut all = storage.load().unwrap_or_default();
         all.push(instance.clone());
         storage.save(&all)?;
 
-        // Start the session
-        instance.start()?;
+        // Cockpit-mode sessions are not backed by tmux; the cockpit
+        // supervisor spawns the ACP agent on demand. Skip the tmux
+        // `start()` to avoid creating an empty pane that no one will
+        // attach to.
+        #[cfg(feature = "serve")]
+        let skip_tmux_start = instance.cockpit_mode;
+        #[cfg(not(feature = "serve"))]
+        let skip_tmux_start = false;
+        if !skip_tmux_start {
+            instance.start()?;
+        }
 
         Ok::<Instance, anyhow::Error>(instance)
     })
@@ -691,8 +771,46 @@ pub async fn create_session(
                 &instance,
                 crate::claude_settings::read_tui_fullscreen(),
             );
+            #[cfg(feature = "serve")]
+            let cockpit_spawn_target = if instance.cockpit_mode {
+                Some((
+                    instance.id.clone(),
+                    instance.tool.clone(),
+                    instance.cockpit_agent.clone(),
+                    instance.cockpit_model.clone(),
+                    instance.project_path.clone(),
+                ))
+            } else {
+                None
+            };
             let mut instances = state.instances.write().await;
             instances.push(instance);
+            drop(instances);
+
+            #[cfg(feature = "serve")]
+            if let Some((id, tool, agent_override, model, project_path)) = cockpit_spawn_target {
+                let agent = state
+                    .cockpit_supervisor
+                    .pick_agent_for_tool(&tool, agent_override.as_deref())
+                    .await;
+                let cwd = std::path::PathBuf::from(project_path);
+                let supervisor = state.cockpit_supervisor.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = supervisor
+                        .spawn(id.clone(), &agent, cwd, vec![], vec![], model)
+                        .await
+                    {
+                        let message = format!("Failed to start cockpit agent {agent:?}: {e}");
+                        tracing::warn!(
+                            target: "cockpit.supervisor",
+                            session = %id,
+                            "auto-spawn after create failed: {message}"
+                        );
+                        supervisor.publish_startup_error(&id, message);
+                    }
+                });
+            }
+
             (
                 StatusCode::CREATED,
                 Json(serde_json::to_value(resp).expect("SessionResponse is always serializable")),

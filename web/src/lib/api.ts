@@ -233,6 +233,10 @@ export interface ServerAbout {
   read_only: boolean;
   behind_tunnel: boolean;
   profile: string;
+  /** True when cockpit is available for new sessions (master switch
+   *  is on AND AOE_EXPERIMENTAL_COCKPIT=1 is set). When false, every
+   *  new session is tmux. */
+  experimental_cockpit: boolean;
 }
 
 export function fetchAbout(): Promise<ServerAbout | null> {

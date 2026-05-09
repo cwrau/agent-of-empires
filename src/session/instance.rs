@@ -206,6 +206,24 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_on_error: Option<bool>,
 
+    /// Whether this session uses the ACP cockpit instead of a tmux pane.
+    /// When true, aoe spawns an ACP agent subprocess and renders structured
+    /// events natively; tmux integration is bypassed for this session.
+    #[cfg(feature = "serve")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cockpit_mode: bool,
+    /// Optional cockpit agent name (e.g., "claude-code", "aoe-agent",
+    /// "gemini"). When None, the cockpit picks the default for the
+    /// session's tool.
+    #[cfg(feature = "serve")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cockpit_agent: Option<String>,
+    /// Optional model id forwarded to aoe-agent (e.g., "claude-opus-4-7",
+    /// "gpt-5", "llama3.3:ollama").
+    #[cfg(feature = "serve")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cockpit_model: Option<String>,
+
     // Runtime state (not serialized)
     #[serde(skip)]
     pub last_error_check: Option<std::time::Instant>,
@@ -387,6 +405,12 @@ impl Instance {
             notify_on_waiting: None,
             notify_on_idle: None,
             notify_on_error: None,
+            #[cfg(feature = "serve")]
+            cockpit_mode: false,
+            #[cfg(feature = "serve")]
+            cockpit_agent: None,
+            #[cfg(feature = "serve")]
+            cockpit_model: None,
             last_error_check: None,
             last_start_time: None,
             last_error: None,
@@ -435,6 +459,21 @@ impl Instance {
 
     pub fn is_yolo_mode(&self) -> bool {
         self.yolo_mode
+    }
+
+    /// True when this session runs through the ACP cockpit (managed by
+    /// `aoe serve`'s supervisor) rather than a tmux pane. Always false
+    /// when the `serve` feature is disabled, since the field doesn't
+    /// exist and no session can be in cockpit mode.
+    pub fn is_cockpit_mode(&self) -> bool {
+        #[cfg(feature = "serve")]
+        {
+            self.cockpit_mode
+        }
+        #[cfg(not(feature = "serve"))]
+        {
+            false
+        }
     }
 
     /// Whether this agent uses a session ID poller for live tracking.
@@ -772,6 +811,15 @@ impl Instance {
         size: Option<(u16, u16)>,
         skip_on_launch: bool,
     ) -> Result<()> {
+        // Cockpit-mode sessions are not backed by tmux. The cockpit
+        // worker supervisor spawns the ACP agent process directly;
+        // calling start() on a cockpit session is a no-op (status
+        // updates flow through the ACP event channel, not tmux).
+        #[cfg(feature = "serve")]
+        if self.cockpit_mode {
+            return Ok(());
+        }
+
         let session = self.tmux_session()?;
 
         if session.exists() {
@@ -1364,6 +1412,26 @@ impl Instance {
             self.status,
             Status::Stopped | Status::Deleting | Status::Creating
         ) {
+            return;
+        }
+
+        // Cockpit-mode sessions are not backed by a tmux pane; the cockpit
+        // worker supervisor owns their lifecycle and emits typed health
+        // events over the broadcast. Probing tmux here only ever produces
+        // a spurious "tmux session is gone" Error transition.
+        #[cfg(feature = "serve")]
+        if self.cockpit_mode {
+            // Clear any stale tmux-derived error so the UI doesn't show
+            // a misleading message after a session is converted or
+            // restarted with cockpit_mode on.
+            if self.last_error.as_deref()
+                == Some("tmux session is gone. The agent process may have exited or been killed.")
+            {
+                self.last_error = None;
+            }
+            if self.status == Status::Error {
+                self.status = Status::Idle;
+            }
             return;
         }
 

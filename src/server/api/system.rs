@@ -385,10 +385,20 @@ pub struct ServerAbout {
     pub read_only: bool,
     pub behind_tunnel: bool,
     pub profile: String,
+    /// True when `AOE_EXPERIMENTAL_COCKPIT=1` is set on the server
+    /// process AND the master switch (`cockpit.enabled`) is on. The
+    /// wizard uses this to decide whether new sessions auto-route
+    /// through cockpit; when false, every new session is tmux.
+    pub experimental_cockpit: bool,
 }
 
 pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> {
     let auth_required = !state.token_manager.is_no_auth().await;
+    #[cfg(feature = "serve")]
+    let experimental_cockpit =
+        state.cockpit_master_enabled && crate::cockpit::experimental_enabled();
+    #[cfg(not(feature = "serve"))]
+    let experimental_cockpit = false;
     Json(ServerAbout {
         version: env!("CARGO_PKG_VERSION").to_string(),
         auth_required,
@@ -396,6 +406,7 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
         read_only: state.read_only,
         behind_tunnel: state.behind_tunnel,
         profile: state.profile.clone(),
+        experimental_cockpit,
     })
 }
 

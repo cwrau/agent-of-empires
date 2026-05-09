@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Add(args)) => cli::add::run(&profile, args).await,
+        Some(Commands::Add(args)) => cli::add::run(&profile, *args).await,
         Some(Commands::List(args)) => cli::list::run(&profile, args).await,
         Some(Commands::Remove(args)) => cli::remove::run(&profile, args).await,
         Some(Commands::Send(args)) => cli::send::run(&profile, args).await,
@@ -116,6 +116,8 @@ async fn main() -> Result<()> {
         Some(Commands::Worktree { command }) => cli::worktree::run(&profile, command).await,
         #[cfg(feature = "serve")]
         Some(Commands::Serve(args)) => cli::serve::run(&profile, args).await,
+        #[cfg(feature = "serve")]
+        Some(Commands::Cockpit { command }) => cli::cockpit::run(command).await,
         None => tui::run(&profile, debug_log_warning).await,
         _ => unreachable!(),
     }

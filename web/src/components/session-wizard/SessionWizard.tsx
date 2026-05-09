@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer } from "react";
 import type { AgentInfo, GroupInfo, ProfileInfo, CreateSessionRequest, SessionResponse } from "../../lib/types";
 import { fetchAgents, fetchGroups, fetchDockerStatus, fetchProfiles, fetchSettings, createSession } from "../../lib/api";
+import { ACP_CAPABLE_TOOLS } from "../../lib/acpCapableTools";
 import { StepIndicator } from "./StepIndicator";
 import type { StepDef, StepId } from "./StepIndicator";
 import { ProjectStep } from "./steps/ProjectStep";
@@ -148,9 +149,14 @@ interface Props {
   onClose: () => void;
   onCreated: (session?: SessionResponse) => void;
   prefill?: WizardPrefill;
+  /** Server-resolved cockpit availability (master switch on AND
+   *  AOE_EXPERIMENTAL_COCKPIT set). When true, ACP-capable tools
+   *  create cockpit sessions automatically; when false, every new
+   *  session is tmux. */
+  experimentalCockpit: boolean;
 }
 
-export function SessionWizard({ onClose, onCreated, prefill }: Props) {
+export function SessionWizard({ onClose, onCreated, prefill, experimentalCockpit }: Props) {
   const prefillData: WizardData = prefill
     ? {
         ...initialData,
@@ -219,6 +225,12 @@ export function SessionWizard({ onClose, onCreated, prefill }: Props) {
       command_override: d.commandOverride || undefined,
       custom_instruction: d.customInstruction || undefined,
       profile: d.profile || undefined,
+      // Cockpit is auto-on for ACP-capable tools when the server
+      // exposes AOE_EXPERIMENTAL_COCKPIT; non-ACP tools and unset
+      // env both fall back to tmux. The server re-applies the same
+      // gate (see allow_cockpit in src/server/api/sessions.rs), so
+      // a tampered client request can't escalate cockpit on.
+      cockpit_mode: experimentalCockpit && ACP_CAPABLE_TOOLS.has(d.tool),
     };
     const result = await createSession(body);
     if (result.ok) { dispatch({ type: "SUBMIT_SUCCESS" }); onCreated(result.session); }
@@ -244,6 +256,7 @@ export function SessionWizard({ onClose, onCreated, prefill }: Props) {
             profiles={state.profiles}
             dockerAvailable={state.dockerAvailable}
             onApplyProfileDefaults={handleApplyProfileDefaults}
+            experimentalCockpit={experimentalCockpit}
           />
         );
       case "review":

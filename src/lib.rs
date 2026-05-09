@@ -3,6 +3,8 @@
 pub mod agents;
 pub mod claude_settings;
 pub mod cli;
+#[cfg(feature = "serve")]
+pub mod cockpit;
 pub mod containers;
 pub mod git;
 pub mod hooks;

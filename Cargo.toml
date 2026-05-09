@@ -66,14 +66,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # HTTP client (for updates)
 reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
 
-# Unix sockets
-tokio-util = { version = "0.7", features = ["codec"] }
+# Unix sockets + futures-compat for ACP byte streams
+tokio-util = { version = "0.7", features = ["codec", "compat"] }
 
 # Platform detection
 cfg-if = "1.0"
 
 # Process handling
-nix = { version = "0.31", features = ["signal", "process", "net", "resource"] }
+nix = { version = "0.31", features = ["signal", "process", "net", "fs", "resource"] }
 
 # Unicode width + normalization (NFKD used to fold accents in title-derived branch names)
 unicode-normalization = "0.1"
@@ -125,6 +125,18 @@ aes-gcm = { version = "0.10", optional = true }
 jsonwebtoken = { version = "10.3", optional = true }
 getrandom = { version = "0.4", optional = true }
 
+# Agent Client Protocol — drives the cockpit surface bundled with `serve`.
+agent-client-protocol = { version = "0.11", optional = true }
+agent-client-protocol-tokio = { version = "0.11", optional = true }
+
+# Node tarball download + extraction for the cockpit's bundled-Node
+# fallback. xz2 needs the system liblzma; we use it for tar.xz
+# extraction. The `tar` crate handles the tarball stream. Hex used
+# for nonce display lives in the cockpit/approvals module's local
+# hex helper, no crate needed.
+tar = { version = "0.4", optional = true }
+xz2 = { version = "0.1", optional = true }
+
 [features]
 default = []
 # Re-exports private tmux env helpers via `crate::tmux::test_support` so that
@@ -144,6 +156,16 @@ serve = [
     "aes-gcm",
     "jsonwebtoken",
     "getrandom",
+    # Cockpit (ACP-based structured rendering of agent state) ships
+    # alongside the web dashboard — the two share state, REST routes,
+    # and the WebSocket fanout. Folded into `serve` so building the
+    # dashboard always includes the cockpit surface; pulling them
+    # apart later is straightforward (cockpit code lives entirely
+    # under src/cockpit/).
+    "agent-client-protocol",
+    "agent-client-protocol-tokio",
+    "tar",
+    "xz2",
 ]
 
 [dev-dependencies]

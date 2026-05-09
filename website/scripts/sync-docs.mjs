@@ -147,6 +147,13 @@ const PAGES = [
       "Complete command-line reference for the aoe CLI tool.",
   },
   {
+    source: "docs/cockpit.md",
+    dest: "docs/cockpit.md",
+    title: "Cockpit (Native Agent Rendering)",
+    description:
+      "Mobile-first native rendering of AI agent state via the Agent Client Protocol (ACP). Plan panels, tool-call cards, swipe-to-approve, multi-provider support.",
+  },
+  {
     source: "docs/api.md",
     dest: "docs/api.md",
     title: "HTTP API Reference",
@@ -166,6 +173,7 @@ const URL_MAP = {
   "docs/development/adding-agents.md": "/docs/development/adding-agents/",
   "docs/guides/configuration.md": "/docs/guides/configuration/",
   "docs/cli/reference.md": "/docs/cli/reference/",
+  "docs/cockpit.md": "/docs/cockpit/",
   "docs/api.md": "/docs/api/",
   // Guides
   "docs/guides/diff-view.md": "/guides/diff-view/",

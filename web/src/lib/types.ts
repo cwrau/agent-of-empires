@@ -28,6 +28,9 @@ export interface SessionResponse {
   notify_on_waiting: boolean | null;
   notify_on_idle: boolean | null;
   notify_on_error: boolean | null;
+  /** True when this session uses ACP cockpit rendering instead of a
+   *  tmux-backed PTY. Absent on builds without the cockpit feature. */
+  cockpit_mode?: boolean;
   /** True when this is a Claude Code session AND the user has enabled
    *  Claude's fullscreen renderer (`tui: "fullscreen"` in
    *  ~/.claude/settings.json). The mobile rendering path uses this to
@@ -228,4 +231,8 @@ export interface CreateSessionRequest {
   command_override?: string;
   custom_instruction?: string;
   profile?: string;
+  /** Substrate selection: true → ACP-based cockpit (Beta),
+   *  false → tmux passthrough (legacy). Server defaults to true on
+   *  web-created sessions; the wizard may override. */
+  cockpit_mode?: boolean;
 }

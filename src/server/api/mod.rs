@@ -10,10 +10,18 @@
 
 pub(super) use super::AppState;
 
+#[cfg(feature = "serve")]
+mod cockpit;
 mod git;
 mod projects;
 mod sessions;
 mod system;
+
+#[cfg(feature = "serve")]
+pub use cockpit::{
+    cockpit_cancel, cockpit_disable, cockpit_enable, cockpit_files, cockpit_prompt, cockpit_replay,
+    cockpit_set_mode, resolve_approval, shutdown_cockpit, spawn_cockpit,
+};
 
 pub use git::{clone_repo, list_branches};
 pub use projects::{create_project, delete_project, list_projects};

@@ -75,6 +75,30 @@ pub struct AddArgs {
     /// Override the agent binary command
     #[arg(long)]
     cmd_override: Option<String>,
+
+    /// Use cockpit mode (ACP-based native rendering) for this session.
+    /// Overrides the default-for-claude setting in cockpit config.
+    #[cfg(feature = "serve")]
+    #[arg(long, conflicts_with = "no_cockpit")]
+    cockpit: bool,
+
+    /// Force terminal/PTY mode for this session, overriding the
+    /// default-for-claude cockpit setting.
+    #[cfg(feature = "serve")]
+    #[arg(long = "no-cockpit", conflicts_with = "cockpit")]
+    no_cockpit: bool,
+
+    /// Pick a specific cockpit agent (e.g., aoe-agent, claude-code).
+    /// Implies --cockpit.
+    #[cfg(feature = "serve")]
+    #[arg(long = "agent")]
+    agent: Option<String>,
+
+    /// Override the model used by aoe-agent (e.g., claude-opus-4-7,
+    /// gpt-5, gemini-2.5-pro). Forwarded to the agent at session start.
+    #[cfg(feature = "serve")]
+    #[arg(long = "model")]
+    model: Option<String>,
 }
 
 pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
@@ -327,6 +351,90 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         }
     }
 
+    // Cockpit mode: explicit --cockpit overrides config; --no-cockpit
+    // forces terminal mode; otherwise honor the config default for
+    // claude on supported platforms.
+    //
+    // Two independent gates:
+    //   - `cockpit.enabled = false` in config.toml is the persistent
+    //     master switch.
+    //   - `AOE_EXPERIMENTAL_COCKPIT=1` is the per-process opt-in for
+    //     *new* sessions while the feature stabilises.
+    // Each refuses `--cockpit` with its own actionable error so the
+    // user knows which knob to flip.
+    #[cfg(feature = "serve")]
+    {
+        let user_picked_cockpit = args.cockpit || args.agent.is_some();
+        let user_forced_terminal = args.no_cockpit;
+        if user_picked_cockpit {
+            if !config.cockpit.enabled {
+                bail!(
+                    "Cockpit is disabled by config (`cockpit.enabled = false` in config.toml). \
+                     Toggle it on (e.g. via the settings TUI) and try again, or omit --cockpit \
+                     for a tmux session."
+                );
+            }
+            if !crate::cockpit::experimental_enabled() {
+                bail!(
+                    "Cockpit is experimental. Set AOE_EXPERIMENTAL_COCKPIT=1 to opt in, or omit --cockpit / --agent for a tmux session."
+                );
+            }
+        }
+        let allow_default_cockpit = crate::cockpit::experimental_enabled();
+        instance.cockpit_mode = if user_forced_terminal {
+            false
+        } else if user_picked_cockpit {
+            true
+        } else {
+            allow_default_cockpit
+                && config.cockpit.enabled
+                && config.cockpit.default_for_claude
+                && instance.tool == "claude"
+        };
+        instance.cockpit_agent = args.agent.clone();
+        instance.cockpit_model = args.model.clone();
+
+        // Precondition: cockpit sessions are only usable if the resolved
+        // ACP adapter binary is on PATH. Persisting a session whose
+        // adapter is missing produces a silent failure mode where the
+        // dashboard shows the session, the supervisor's reconciler
+        // tries to spawn, AcpClient::spawn fails with "No such file
+        // or directory", and the user sees a 404 on their first
+        // prompt. Bail at add-time with the install hint instead.
+        // `--no-cockpit` and the implicit-default branch don't trip
+        // this — only sessions the user explicitly opted into cockpit
+        // for, where missing tooling is a hard error rather than a
+        // silent fallback to tmux.
+        if instance.cockpit_mode && user_picked_cockpit {
+            let registry = crate::cockpit::agent_registry::AgentRegistry::with_defaults();
+            let agent_name = pick_cockpit_agent_name(
+                &registry,
+                &instance.tool,
+                instance.cockpit_agent.as_deref(),
+            );
+            if let Some(spec) = registry.get(&agent_name) {
+                if !crate::cli::cockpit::command_present(&spec.command) {
+                    let hint = crate::cli::cockpit::install_hint_for(&spec.command)
+                        .unwrap_or("install via your package manager and re-run");
+                    bail!(
+                        "cockpit ACP adapter `{}` is not installed or not on $PATH.\n\
+                         Install: {}\n\
+                         Or run: aoe cockpit doctor --fix\n\
+                         Or use the bundled fallback: rerun with `--agent aoe-agent`\n\
+                         Or skip cockpit: rerun with `--no-cockpit` for a tmux-backed session.",
+                        spec.command,
+                        hint
+                    );
+                }
+            } else {
+                bail!(
+                    "cockpit agent `{agent_name}` is not in the registry.\n\
+                     Run `aoe cockpit doctor` to see configured agents."
+                );
+            }
+        }
+    }
+
     // Handle sandbox setup
     let use_sandbox = args.sandbox || args.sandbox_image.is_some();
 
@@ -481,7 +589,30 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         }
     }
 
-    if args.launch {
+    #[cfg(feature = "serve")]
+    let is_cockpit = instance.cockpit_mode;
+    #[cfg(not(feature = "serve"))]
+    let is_cockpit = false;
+
+    if is_cockpit {
+        // Cockpit sessions aren't backed by tmux: their ACP worker is
+        // owned by `aoe serve`'s supervisor, which the
+        // status_poll_loop reconciler auto-spawns within ~2s of the
+        // session appearing on disk. `--launch` and the
+        // `aoe session start` next-step would both no-op (or now
+        // bail), so route the user to the dashboard instead.
+        println!();
+        println!("Next steps:");
+        println!("  aoe serve                   # Start the dashboard (worker auto-spawns)");
+        println!("  Open the printed URL and select '{}'.", final_title);
+        if args.launch {
+            println!();
+            println!(
+                "(--launch is a no-op for cockpit sessions; \
+                 lifecycle is managed by `aoe serve`.)"
+            );
+        }
+    } else if args.launch {
         let idx = instances
             .iter()
             .position(|i| i.id == instance.id)
@@ -507,6 +638,31 @@ pub fn is_duplicate_session(instances: &[Instance], title: &str, path: &str) -> 
         let existing_path = inst.project_path.trim_end_matches('/');
         existing_path == normalized_path && inst.title == title
     })
+}
+
+/// Sync mirror of `Supervisor::pick_agent_for_tool` so add-time
+/// precondition checks can resolve the agent without spinning up the
+/// async supervisor. Precedence: explicit override → tool-keyed
+/// registry entry → legacy (`claude` → `claude`, else `aoe-agent`).
+#[cfg(feature = "serve")]
+fn pick_cockpit_agent_name(
+    registry: &crate::cockpit::agent_registry::AgentRegistry,
+    tool: &str,
+    explicit_override: Option<&str>,
+) -> String {
+    if let Some(name) = explicit_override {
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    if registry.get(tool).is_some() {
+        return tool.to_string();
+    }
+    if tool == "claude" {
+        "claude".into()
+    } else {
+        "aoe-agent".into()
+    }
 }
 
 fn detect_tool(cmd: &str) -> Result<String> {

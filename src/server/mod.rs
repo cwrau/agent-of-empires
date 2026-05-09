@@ -5,6 +5,8 @@
 
 pub mod api;
 pub mod auth;
+#[cfg(feature = "serve")]
+pub mod cockpit_ws;
 pub mod login;
 pub mod push;
 pub mod push_send;
@@ -23,6 +25,20 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::info;
 
 use self::push::{PushState, StatusChange, STATUS_CHANNEL_CAPACITY};
+
+#[cfg(feature = "serve")]
+const COCKPIT_CHANNEL_CAPACITY: usize = 256;
+
+/// One frame on the per-AppState cockpit broadcast channel: the cockpit
+/// session id plus the serialised cockpit Event JSON. Subscribed
+/// WebSocket clients filter on the session id.
+#[cfg(feature = "serve")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CockpitBroadcastFrame {
+    pub session_id: String,
+    pub seq: u64,
+    pub event: serde_json::Value,
+}
 
 use crate::session::Instance;
 use crate::session::Storage;
@@ -211,6 +227,43 @@ pub struct AppState {
     /// Snapshot of the resolved WebConfig at startup. Consumed by the
     /// push consumer task to evaluate per-event-type defaults.
     pub web_config: crate::session::config::WebConfig,
+    /// Broadcasts cockpit events to subscribed WebSocket clients. The
+    /// channel carries `(session_id, serialized event JSON)` frames so
+    /// clients can filter by session. Empty when no clients are
+    /// connected; senders never need to check before emitting.
+    #[cfg(feature = "serve")]
+    pub cockpit_events_tx: broadcast::Sender<CockpitBroadcastFrame>,
+    /// Per-session replay buffer of cockpit frames. Populated on every
+    /// `ChannelSink::publish`; consulted by
+    /// `GET /api/sessions/{id}/cockpit/replay?since={seq}` so a
+    /// reconnecting WebSocket client can recover any frames it missed
+    /// during a brief network blip without dropping the conversation.
+    /// Sync mutex (not async) so the publish path stays sync-only and
+    /// preserves seq ordering; both pushers and the snapshot reader
+    /// hold the lock for very brief operations.
+    #[cfg(feature = "serve")]
+    pub cockpit_replay: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, crate::cockpit::replay_buffer::ReplayBuffer>,
+        >,
+    >,
+    /// Per-session replay-buffer sizing pulled from `[cockpit]` config
+    /// at startup. Lazy-initialised entries in `cockpit_replay` use
+    /// these caps.
+    #[cfg(feature = "serve")]
+    pub cockpit_replay_caps: (usize, usize),
+    /// Snapshot of `config.cockpit.enabled` taken at startup. Acts
+    /// as the documented master kill switch: when false, the
+    /// reconciler skips auto-spawn and every cockpit-spawning REST
+    /// path refuses with 503. Toggling the value in `config.toml`
+    /// requires `aoe serve` to restart, mirroring how
+    /// `web.notifications_enabled` works elsewhere.
+    #[cfg(feature = "serve")]
+    pub cockpit_master_enabled: bool,
+    /// Owns the per-session ACP agent subprocesses.
+    #[cfg(feature = "serve")]
+    pub cockpit_supervisor:
+        Arc<crate::cockpit::supervisor::Supervisor<crate::cockpit::supervisor::ChannelSink>>,
     /// Per-tmux-session primary WebSocket client. Maps tmux session name
     /// to the client ID that most recently sent keyboard input. Only the
     /// primary client's resize messages are applied to its PTY, preventing
@@ -406,6 +459,62 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         None
     };
 
+    #[cfg(feature = "serve")]
+    let cockpit_events_tx = broadcast::channel(COCKPIT_CHANNEL_CAPACITY).0;
+    #[cfg(feature = "serve")]
+    let cockpit_replay: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, crate::cockpit::replay_buffer::ReplayBuffer>,
+        >,
+    > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    #[cfg(feature = "serve")]
+    let cockpit_replay_caps = (
+        config.cockpit.replay_events as usize,
+        config.cockpit.replay_bytes as usize,
+    );
+    #[cfg(feature = "serve")]
+    let cockpit_master_enabled = config.cockpit.enabled;
+    #[cfg(feature = "serve")]
+    let cockpit_supervisor = {
+        let push_for_sink = push_state.clone();
+        let push_enabled_for_sink = push_enabled;
+        let on_approval =
+            std::sync::Arc::new(move |session_id: &str, title: &str, destructive: bool| {
+                let session_id = session_id.to_string();
+                let title = title.to_string();
+                let push = push_for_sink.clone();
+                tokio::spawn(async move {
+                    if let Some(_push) = push {
+                        if push_enabled_for_sink {
+                            // We re-enter the cockpit_ws helper when we have
+                            // an AppState in scope; the standalone trigger
+                            // here just logs intent. The full server-driven
+                            // path lives at cockpit_ws::trigger_approval_push,
+                            // invoked from the API handler that receives
+                            // the cockpit broadcast.
+                            tracing::debug!(
+                                target: "cockpit.supervisor",
+                                session = %session_id,
+                                title = %title,
+                                destructive,
+                                "approval event observed (push delivery handled via api layer)"
+                            );
+                        }
+                    }
+                });
+            }) as std::sync::Arc<dyn Fn(&str, &str, bool) + Send + Sync>;
+        let sink = std::sync::Arc::new(crate::cockpit::supervisor::ChannelSink {
+            tx: cockpit_events_tx.clone(),
+            on_approval,
+            replay: cockpit_replay.clone(),
+            replay_caps: cockpit_replay_caps,
+        });
+        std::sync::Arc::new(crate::cockpit::supervisor::Supervisor::with_capacity(
+            sink,
+            config.cockpit.max_concurrent_workers,
+        ))
+    };
+
     let state = Arc::new(AppState {
         profile: profile.to_string(),
         read_only,
@@ -426,6 +535,16 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         session_primaries: Arc::new(RwLock::new(std::collections::HashMap::new())),
         session_pause_counts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         status_tx: broadcast::channel(STATUS_CHANNEL_CAPACITY).0,
+        #[cfg(feature = "serve")]
+        cockpit_events_tx: cockpit_events_tx.clone(),
+        #[cfg(feature = "serve")]
+        cockpit_replay: cockpit_replay.clone(),
+        #[cfg(feature = "serve")]
+        cockpit_replay_caps,
+        #[cfg(feature = "serve")]
+        cockpit_master_enabled,
+        #[cfg(feature = "serve")]
+        cockpit_supervisor: cockpit_supervisor.clone(),
         push: push_state,
         push_enabled,
         web_config: config.web.clone(),
@@ -433,6 +552,14 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     });
 
     let app = build_router(state.clone());
+
+    // Cockpit workers for persisted sessions get auto-spawned by the
+    // reconciler in `status_poll_loop`. The poll interval's first tick
+    // fires immediately, so on cold startup this is equivalent to the
+    // old in-place loop here, while also covering sessions added via
+    // `aoe add --cockpit` while serve is already running. The
+    // reconciler short-circuits when `cockpit.enabled = false`.
+
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let local_port = listener.local_addr()?.port();
@@ -738,6 +865,10 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown_signal)
     .await?;
 
+    // Tear down every cockpit ACP worker so the spawned `claude-agent-acp`
+    // wrappers (and their SDK children) don't outlive the daemon.
+    cockpit_supervisor.shutdown_all().await;
+
     // Clean up tunnel (cancels health monitor, then sends SIGTERM to cloudflared)
     if let Some(handle) = tunnel_handle {
         handle.shutdown().await;
@@ -753,7 +884,7 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
 fn build_router(state: Arc<AppState>) -> Router {
     use axum::routing::{delete, get, patch, post};
 
-    Router::new()
+    let app = Router::new()
         // Sessions
         .route(
             "/api/sessions",
@@ -835,7 +966,44 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/sessions/{id}/container-terminal/ws",
             get(ws::container_terminal_ws),
+        );
+
+    #[cfg(feature = "serve")]
+    let app = app
+        .route("/sessions/{id}/cockpit/ws", get(cockpit_ws::cockpit_ws))
+        .route("/api/sessions/{id}/cockpit/spawn", post(api::spawn_cockpit))
+        .route("/api/sessions/{id}/cockpit", delete(api::shutdown_cockpit))
+        .route(
+            "/api/sessions/{id}/cockpit/prompt",
+            post(api::cockpit_prompt),
         )
+        .route(
+            "/api/sessions/{id}/cockpit/cancel",
+            post(api::cockpit_cancel),
+        )
+        .route("/api/sessions/{id}/cockpit/files", get(api::cockpit_files))
+        .route(
+            "/api/sessions/{id}/cockpit/replay",
+            get(api::cockpit_replay),
+        )
+        .route(
+            "/api/sessions/{id}/cockpit/mode",
+            post(api::cockpit_set_mode),
+        )
+        .route(
+            "/api/sessions/{id}/cockpit/enable",
+            post(api::cockpit_enable),
+        )
+        .route(
+            "/api/sessions/{id}/cockpit/disable",
+            post(api::cockpit_disable),
+        )
+        .route(
+            "/api/sessions/{id}/cockpit/approvals/{nonce}",
+            post(api::resolve_approval),
+        );
+
+    app
         // Static assets (Vite build output: assets/, manifest.json, sw.js, icons)
         .route("/assets/{*path}", get(serve_asset))
         .route("/manifest.json", get(serve_public_file))
@@ -1100,6 +1268,108 @@ fn load_all_instances() -> anyhow::Result<Vec<Instance>> {
     Ok(all)
 }
 
+/// Reconcile cockpit workers against the on-disk session list. Spawns a
+/// worker for every cockpit-mode session that doesn't already have one,
+/// recording the attempt in `attempted` so a permanently-failing spawn
+/// (e.g. `claude-agent-acp` not installed) doesn't retry every 2s tick.
+/// Pruning `attempted` to live ids first lets a delete + recreate of
+/// the same id spawn again.
+///
+/// Covers three entry points to "cockpit session exists, no worker
+/// running": cold serve startup (first tick fires immediately), `aoe
+/// add --cockpit` while serve is running (next tick after the disk
+/// write), and any race where serve starts before a session file is
+/// fully written.
+#[cfg(feature = "serve")]
+async fn reconcile_cockpit_workers(
+    state: &Arc<AppState>,
+    attempted: &mut std::collections::HashSet<String>,
+) {
+    // Honor `cockpit.enabled = false` from config.toml — the persistent
+    // master switch. Snapshotted at startup; flipping it requires
+    // `aoe serve` to restart, mirroring how `web.notifications_enabled`
+    // works. To stop cockpit on a running daemon: `aoe serve --stop`,
+    // toggle the field, then start again.
+    if !state.cockpit_master_enabled {
+        return;
+    }
+
+    let targets: Vec<_> = {
+        let instances = state.instances.read().await;
+        instances
+            .iter()
+            .filter(|i| i.cockpit_mode)
+            .map(|i| {
+                (
+                    i.id.clone(),
+                    i.tool.clone(),
+                    i.cockpit_agent.clone(),
+                    i.cockpit_model.clone(),
+                    i.project_path.clone(),
+                )
+            })
+            .collect()
+    };
+
+    let live: std::collections::HashSet<&String> = targets.iter().map(|t| &t.0).collect();
+    attempted.retain(|id| live.contains(id));
+
+    for (id, tool, agent_override, model, project_path) in targets {
+        if attempted.contains(&id) {
+            continue;
+        }
+        if state.cockpit_supervisor.is_running(&id).await {
+            // A REST-triggered spawn (POST /api/sessions or
+            // /api/cockpit/sessions/:id/enable) already owns the worker;
+            // record the id so we don't poll is_running every tick.
+            attempted.insert(id);
+            continue;
+        }
+        // Mark before spawning so the next 2s tick doesn't double-spawn
+        // while AcpClient::spawn is still negotiating with the agent.
+        attempted.insert(id.clone());
+        // Persisted cockpit-mode sessions auto-spawn even when
+        // `AOE_EXPERIMENTAL_COCKPIT` is unset (the env-var gate is for
+        // *new* sessions, not pre-existing ones). Log a warning per
+        // session so operators who unset the env var on a daemon with
+        // existing cockpit sessions know why those are still running.
+        // The `attempted` set bounds this to one log line per session
+        // per daemon lifetime.
+        if !crate::cockpit::experimental_enabled() {
+            tracing::warn!(
+                target: "cockpit.supervisor",
+                session = %id,
+                "auto-spawning persisted cockpit-mode session while \
+                 AOE_EXPERIMENTAL_COCKPIT is not set. To stop cockpit \
+                 from running existing sessions, set \
+                 `cockpit.enabled = false` in config.toml and restart \
+                 `aoe serve`. To stop just this one, switch its \
+                 substrate to tmux from the dashboard."
+            );
+        }
+        let supervisor = state.cockpit_supervisor.clone();
+        let agent = supervisor
+            .pick_agent_for_tool(&tool, agent_override.as_deref())
+            .await;
+        let cwd = std::path::PathBuf::from(project_path);
+        tokio::spawn(async move {
+            if let Err(e) = supervisor
+                .spawn(id.clone(), &agent, cwd, vec![], vec![], model)
+                .await
+            {
+                let message = format!("Failed to start cockpit agent {agent:?}: {e}");
+                tracing::warn!(
+                    target: "cockpit.supervisor",
+                    session = %id,
+                    agent = %agent,
+                    "auto-spawn reconciler failed: {message}"
+                );
+                supervisor.publish_startup_error(&id, message);
+            }
+        });
+    }
+}
+
 /// Background task that periodically refreshes session statuses. On each
 /// tick, diffs pre- and post-refresh statuses and emits a `StatusChange`
 /// on `state.status_tx` for every transition. Keeping the diff here,
@@ -1108,6 +1378,9 @@ fn load_all_instances() -> anyhow::Result<Vec<Instance>> {
 /// and keeps TUI/CLI callers unchanged.
 async fn status_poll_loop(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    #[cfg(feature = "serve")]
+    let mut attempted_cockpit_spawns: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     loop {
         interval.tick().await;
 
@@ -1156,6 +1429,9 @@ async fn status_poll_loop(state: Arc<AppState>) {
                 }
             }
             *state.instances.write().await = instances;
+
+            #[cfg(feature = "serve")]
+            reconcile_cockpit_workers(&state, &mut attempted_cockpit_spawns).await;
         }
     }
 }

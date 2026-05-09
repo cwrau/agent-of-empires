@@ -10,8 +10,10 @@ import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
 import { MobileTerminalToolbar } from "./MobileTerminalToolbar";
 import { BackToLiveButton } from "./BackToLiveButton";
 import { KeyboardFab } from "./KeyboardFab";
+import { SwitchSubstrateAction } from "./cockpit/SwitchSubstrateAction";
 import { ViewportFullscreenFab } from "./ViewportFullscreenFab";
 import { ensureSession } from "../lib/api";
+import { ACP_CAPABLE_TOOLS } from "../lib/acpCapableTools";
 import type { SessionResponse } from "../lib/types";
 import {
   FOCUS_TERMINAL_EVENT,
@@ -23,12 +25,16 @@ import "@wterm/dom/css";
 
 interface Props {
   session: SessionResponse;
+  /** When false (the default) the switch-to-cockpit pill is hidden
+   *  entirely so users on a non-experimental server aren't tempted
+   *  by a button that the server will reject. */
+  experimentalCockpit?: boolean;
 }
 
 const SCROLL_HINT_SEEN_KEY = "aoe-mobile-scroll-hint-seen";
 const SCROLL_HINT_TIMEOUT_MS = 8000;
 
-export function TerminalView({ session }: Props) {
+export function TerminalView({ session, experimentalCockpit = false }: Props) {
   const [ensureState, setEnsureState] = useState<"pending" | "ready" | "error">(
     "pending",
   );
@@ -328,6 +334,20 @@ export function TerminalView({ session }: Props) {
       className="flex-1 flex flex-col overflow-hidden relative md:bg-surface-800 md:pb-1.5"
       style={rootStyle}
     >
+      {/* Top-right substrate switch — discreet pill that lets the
+          user flip this session into cockpit mode. Only rendered
+          when the operator opted into AOE_EXPERIMENTAL_COCKPIT, and
+          only enabled for tools whose ACP adapter we ship. */}
+      {session?.id && experimentalCockpit && (
+        <div className="absolute right-2 top-2 z-10">
+          <SwitchSubstrateAction
+            sessionId={session.id}
+            cockpitMode={false}
+            acpCapable={ACP_CAPABLE_TOOLS.has(session.tool)}
+            variant="icon"
+          />
+        </div>
+      )}
       {!state.connected && state.reconnecting && (
         <div className="bg-status-waiting/15 border-b border-status-waiting/30 px-4 py-1.5 flex items-center gap-2 shrink-0">
           <span className="text-xs text-status-waiting">
