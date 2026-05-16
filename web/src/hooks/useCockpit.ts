@@ -11,6 +11,8 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   applyEvent,
   emptyCockpitState,
+  isTurnActive,
+  normaliseTurnCounters,
   setActivityLimit,
   type ApprovalDecision,
   type CockpitFrame,
@@ -111,7 +113,10 @@ function loadPersistedState(sessionId: string): CockpitState | undefined {
       window.localStorage.removeItem(storageKey(sessionId));
       return undefined;
     }
-    return state as CockpitState;
+    // Backfill the seq-counter pair introduced by #1170 for entries
+    // persisted before the schema change; see `normaliseTurnCounters`
+    // for the rules.
+    return normaliseTurnCounters(state as CockpitState);
   } catch {
     return undefined;
   }
@@ -275,6 +280,13 @@ function reducer(state: CockpitState, action: Action): CockpitState {
     return action.state;
   }
   if (action.kind === "user_prompt") {
+    // Bump `pendingUserPromptSeq` rather than touching `turnActive`
+    // directly. `turnActive` derives from `pendingUserPromptSeq >
+    // lastStoppedSeq`; the derived alias is recomputed here so any
+    // existing `state.turnActive` reads stay consistent without a
+    // selector hop. Without this the late `Stopped` from the prior
+    // turn could clobber the spinner mid follow-up. See #1170.
+    const pendingUserPromptSeq = state.pendingUserPromptSeq + 1;
     return {
       ...state,
       activity: state.activity.concat({
@@ -288,7 +300,11 @@ function reducer(state: CockpitState, action: Action): CockpitState {
       // they're trying again, so don't keep nagging them.
       startupError: null,
       lastError: null,
-      turnActive: true,
+      pendingUserPromptSeq,
+      turnActive: isTurnActive({
+        pendingUserPromptSeq,
+        lastStoppedSeq: state.lastStoppedSeq,
+      }),
     };
   }
   if (action.kind === "enqueue_prompt") {
