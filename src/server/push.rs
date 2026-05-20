@@ -332,6 +332,12 @@ pub struct PushState {
     /// either `mailto:` or an `https://` URL per the spec. Not strongly
     /// validated by push endpoints in practice.
     pub subject: String,
+    /// Shared `SEND_CONCURRENCY` budget across every send_one path.
+    /// `spawn_consumer`'s fire_due_pushes loop and the wake fire path
+    /// both `acquire_owned` here, so a session with many subscribers
+    /// cannot fan out beyond the gateway concurrency the consumer
+    /// pipeline expects.
+    pub send_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 /// VAPID `sub` claim (RFC 8292). Spec requires a `mailto:` or `https://`
@@ -348,6 +354,7 @@ impl PushState {
             vapid,
             store,
             subject: VAPID_SUBJECT.to_string(),
+            send_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(SEND_CONCURRENCY)),
         })
     }
 }
@@ -429,7 +436,11 @@ pub fn spawn_consumer(state: std::sync::Arc<super::AppState>) {
                 return;
             }
         };
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(SEND_CONCURRENCY));
+        let semaphore = state
+            .push
+            .as_ref()
+            .map(|p| p.send_semaphore.clone())
+            .expect("spawn_consumer requires push enabled; checked above");
         let mut rx = state.status_tx.subscribe();
         let mut dwell: HashMap<String, DwellState> = HashMap::new();
         // Tracks the last suppression reason so we only log on transitions
@@ -759,6 +770,7 @@ pub async fn fire_wake_fired_push(
         };
         let client = client.clone();
         let push = push.clone();
+        let permit_sem = push.send_semaphore.clone();
         let payload_clone = super::push_send::PushPayload {
             title: "Scheduled wakeup fired".to_string(),
             body: body.clone(),
@@ -767,6 +779,13 @@ pub async fn fire_wake_fired_push(
             session_id: session_id.to_string(),
         };
         tokio::spawn(async move {
+            // Acquire from the same SEND_CONCURRENCY budget that
+            // `spawn_consumer`'s fire_due_pushes uses, so a wake
+            // fire with many subscribers cannot outrun the gateway
+            // concurrency cap the rest of the pipeline expects.
+            let Ok(_permit) = permit_sem.acquire_owned().await else {
+                return;
+            };
             let outcome =
                 super::push_send::send_one(&client, push.as_ref(), &sub, &payload_clone).await;
             if outcome == super::push_send::SendOutcome::Gone {
