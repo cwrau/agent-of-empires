@@ -183,7 +183,7 @@ pub struct Supervisor<S: BroadcastSink> {
     /// reservation, two concurrent callers both pass the empty-`workers`
     /// check and race to insert. The RAII `ResumeReservation` guard
     /// removes the entry on success, error, or panic.
-    pending_resumes: Arc<Mutex<HashMap<String, ResumeKind>>>,
+    pending_resumes: Arc<std::sync::Mutex<HashMap<String, ResumeKind>>>,
     /// Session ids whose in-flight `spawn` should bail out instead of
     /// inserting the freshly-spawned WorkerHandle. Set by `shutdown`
     /// when it observes a session that's in `pending_resumes` but not
@@ -192,7 +192,7 @@ pub struct Supervisor<S: BroadcastSink> {
     /// UnknownSession) but the in-flight spawn would still complete a
     /// few seconds later, producing an orphaned worker the user can no
     /// longer manage.
-    cancelled_spawns: Arc<Mutex<HashSet<String>>>,
+    cancelled_spawns: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Per-agent install gate. claude-agent-acp lazy-installs its
     /// native binary on first ever run; two concurrent `session/new`
     /// calls against a partially-installed SDK race the install and
@@ -201,14 +201,14 @@ pub struct Supervisor<S: BroadcastSink> {
     /// process lifetime lets every subsequent spawn proceed in
     /// parallel without the gate. Reset on every `aoe serve` restart
     /// (warm-cache restarts pay one serial spawn). See #1088.
-    warmed_up_agents: Arc<Mutex<HashSet<String>>>,
+    warmed_up_agents: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Per-agent warm-up locks. The first `spawn` for an agent name
     /// that is not yet in `warmed_up_agents` acquires the matching
     /// lock for the duration of its handshake, then inserts the agent
     /// into the warm-up set. Subsequent concurrent callers `await`
     /// the lock, see the agent is now warmed up, and proceed without
     /// re-acquiring it. See #1088.
-    agent_warmup_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    agent_warmup_locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Cap on concurrently-running workers, snapshotted from
     /// `[cockpit] max_concurrent_workers` at startup. Enforced in
     /// `spawn`; new workers past the cap return `CapacityFull`.
@@ -223,21 +223,21 @@ pub struct Supervisor<S: BroadcastSink> {
 /// leave a phantom reservation that blocks every future resume for
 /// that session AND keeps the UI stuck on "Resuming…".
 struct ResumeReservation {
-    pending: Arc<Mutex<HashMap<String, ResumeKind>>>,
+    pending: Arc<std::sync::Mutex<HashMap<String, ResumeKind>>>,
     session_id: String,
 }
 
 impl Drop for ResumeReservation {
     fn drop(&mut self) {
-        // Sync remove via blocking_lock would deadlock inside an
-        // async runtime; spawn a detached task to release. The map
-        // operation is constant-time and the task lives only for the
-        // duration of one `lock().await` + remove.
-        let pending = Arc::clone(&self.pending);
+        // Sync remove against std::sync::Mutex; constant time, never
+        // blocks on an await. The previous shape spawned a detached
+        // task to release a tokio::sync::Mutex, which required a live
+        // runtime at drop time and orphaned the entry if the runtime
+        // was already shutting down. `lock_recover` handles the case
+        // where another holder panicked while owning the guard so the
+        // reservation is still cleared instead of leaking.
         let session_id = std::mem::take(&mut self.session_id);
-        tokio::spawn(async move {
-            pending.lock().await.remove(&session_id);
-        });
+        lock_recover(&self.pending).remove(&session_id);
     }
 }
 
@@ -296,10 +296,10 @@ impl<S: BroadcastSink> Supervisor<S> {
             registry: Arc::new(Mutex::new(AgentRegistry::with_defaults())),
             workers: Arc::new(Mutex::new(HashMap::new())),
             next_seqs: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            pending_resumes: Arc::new(Mutex::new(HashMap::new())),
-            cancelled_spawns: Arc::new(Mutex::new(HashSet::new())),
-            warmed_up_agents: Arc::new(Mutex::new(HashSet::new())),
-            agent_warmup_locks: Arc::new(Mutex::new(HashMap::new())),
+            pending_resumes: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cancelled_spawns: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            warmed_up_agents: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            agent_warmup_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             max_concurrent_workers,
         }
     }
@@ -314,7 +314,7 @@ impl<S: BroadcastSink> Supervisor<S> {
         for id in self.workers.lock().await.keys() {
             out.insert(id.clone(), CockpitWorkerState::Running);
         }
-        for id in self.pending_resumes.lock().await.keys() {
+        for id in lock_recover(&self.pending_resumes).keys() {
             // Running wins over Resuming if both maps happen to carry
             // the id during a hand-off; the WorkerHandle is the
             // authoritative "online" signal.
@@ -332,7 +332,7 @@ impl<S: BroadcastSink> Supervisor<S> {
         if self.workers.lock().await.contains_key(session_id) {
             return CockpitWorkerState::Running;
         }
-        if self.pending_resumes.lock().await.contains_key(session_id) {
+        if lock_recover(&self.pending_resumes).contains_key(session_id) {
             return CockpitWorkerState::Resuming;
         }
         CockpitWorkerState::Absent
@@ -550,7 +550,7 @@ impl<S: BroadcastSink> Supervisor<S> {
             // observed atomically. A second caller arriving here sees
             // either the workers entry (after insert below) or the
             // pending entry; in both cases it returns AlreadyRunning.
-            let mut pending = self.pending_resumes.lock().await;
+            let mut pending = lock_recover(&self.pending_resumes);
             if pending.contains_key(&session_id) {
                 return Err(SupervisorError::AlreadyRunning(session_id));
             }
@@ -584,13 +584,10 @@ impl<S: BroadcastSink> Supervisor<S> {
         // warm-cache restarts pay one serial spawn before the rest
         // parallelize. See #1088.
         let warmup_guard = {
-            if self.warmed_up_agents.lock().await.contains(&agent) {
+            if lock_recover(&self.warmed_up_agents).contains(&agent) {
                 None
             } else {
-                let lock = self
-                    .agent_warmup_locks
-                    .lock()
-                    .await
+                let lock = lock_recover(&self.agent_warmup_locks)
                     .entry(agent.clone())
                     .or_insert_with(|| Arc::new(Mutex::new(())))
                     .clone();
@@ -650,7 +647,7 @@ impl<S: BroadcastSink> Supervisor<S> {
         // success: a failed warm-up should leave the next caller to
         // retry the gate. See #1088.
         if warmup_guard.is_some() {
-            self.warmed_up_agents.lock().await.insert(agent.clone());
+            lock_recover(&self.warmed_up_agents).insert(agent.clone());
         }
         drop(warmup_guard);
 
@@ -682,7 +679,7 @@ impl<S: BroadcastSink> Supervisor<S> {
         // and skip the workers insert so the user's "disable" actually
         // takes effect instead of being silently overwritten by the
         // 2-3s-late spawn completion.
-        if self.cancelled_spawns.lock().await.remove(&session_id) {
+        if lock_recover(&self.cancelled_spawns).remove(&session_id) {
             debug!(
                 target: "cockpit.supervisor",
                 session = %session_id,
@@ -1087,7 +1084,7 @@ impl<S: BroadcastSink> Supervisor<S> {
             // flight, wait for it; otherwise the worker isn't coming
             // and we should fail fast rather than burn the full
             // deadline.
-            if !self.pending_resumes.lock().await.contains_key(session_id) {
+            if !lock_recover(&self.pending_resumes).contains_key(session_id) {
                 return false;
             }
             if start.elapsed() >= deadline {
@@ -1185,7 +1182,7 @@ impl<S: BroadcastSink> Supervisor<S> {
         // and insert a WorkerHandle while we're walking through this
         // function. Lock order matches `spawn`: workers, then pending.
         let mut workers = self.workers.lock().await;
-        let pending_has_it = self.pending_resumes.lock().await.contains_key(session_id);
+        let pending_has_it = lock_recover(&self.pending_resumes).contains_key(session_id);
         if let Some(handle) = workers.remove(session_id) {
             // Worker is alive — tear it down.
             drop(workers);
@@ -1240,10 +1237,7 @@ impl<S: BroadcastSink> Supervisor<S> {
             // (ResumeReservation::Drop) clears `pending_resumes` on
             // exit, so we don't have to.
             drop(workers);
-            self.cancelled_spawns
-                .lock()
-                .await
-                .insert(session_id.to_string());
+            lock_recover(&self.cancelled_spawns).insert(session_id.to_string());
             debug!(
                 target: "cockpit.supervisor",
                 session = %session_id,
@@ -1379,7 +1373,7 @@ impl<S: BroadcastSink> Supervisor<S> {
                     limit: self.max_concurrent_workers,
                 });
             }
-            let mut pending = self.pending_resumes.lock().await;
+            let mut pending = lock_recover(&self.pending_resumes);
             if pending.contains_key(&session_id) {
                 return Err(SupervisorError::AlreadyRunning(session_id));
             }
@@ -1526,7 +1520,7 @@ impl<S: BroadcastSink> Supervisor<S> {
         if self.workers.lock().await.contains_key(session_id) {
             return true;
         }
-        self.pending_resumes.lock().await.contains_key(session_id)
+        lock_recover(&self.pending_resumes).contains_key(session_id)
     }
 
     /// Return the number of running workers (for the doctor + stats).
@@ -1748,6 +1742,15 @@ fn next_seq(next_seqs: &SeqMap, session_id: &str) -> u64 {
     let entry = guard.entry(session_id.to_string()).or_insert(0);
     *entry = entry.saturating_add(1);
     *entry
+}
+
+/// Take a `std::sync::Mutex` guard, recovering the inner data if
+/// the lock is poisoned. The supervisor maps wrapped in `std::sync::Mutex`
+/// only ever hold short, panic free critical sections (HashMap inserts
+/// or removes), so a poisoned lock from an unrelated panic on the same
+/// state is recoverable rather than fatal.
+fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A `BroadcastSink` impl backed by a tokio broadcast channel. The
@@ -2625,6 +2628,66 @@ mod tests {
     /// installing an orphaned worker. This test exercises the
     /// supervisor-side state machine without a real ACP handshake by
     /// pre-seeding `pending_resumes` and asserting `shutdown`'s effect.
+    /// Regression: `ResumeReservation::drop` must not need a tokio
+    /// runtime. The previous shape detached a `tokio::spawn` to
+    /// release a `tokio::sync::Mutex`; that pattern panicked or
+    /// orphaned the entry when drop ran outside any runtime (e.g.
+    /// during runtime shutdown or in synchronous teardown).
+    #[test]
+    fn resume_reservation_drop_is_synchronous_no_runtime_needed() {
+        let pending: Arc<std::sync::Mutex<HashMap<String, ResumeKind>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        pending
+            .lock()
+            .unwrap()
+            .insert("s-sync-drop".into(), ResumeKind::Spawn);
+
+        let reservation = ResumeReservation {
+            pending: Arc::clone(&pending),
+            session_id: "s-sync-drop".into(),
+        };
+        drop(reservation);
+
+        assert!(
+            !pending.lock().unwrap().contains_key("s-sync-drop"),
+            "Drop must remove the reservation synchronously"
+        );
+    }
+
+    /// Regression: `ResumeReservation::drop` must recover from a
+    /// poisoned `std::sync::Mutex` rather than panic. The maps it
+    /// touches only carry simple Clone state, so an unrelated panic
+    /// while another holder owned the guard must not cascade into a
+    /// drop-time panic that would crash the runtime worker.
+    #[test]
+    fn resume_reservation_drop_recovers_from_poisoned_mutex() {
+        let pending: Arc<std::sync::Mutex<HashMap<String, ResumeKind>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        pending
+            .lock()
+            .unwrap()
+            .insert("s-poison".into(), ResumeKind::Spawn);
+
+        let p_clone = Arc::clone(&pending);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = p_clone.lock().unwrap();
+            panic!("intentional panic to poison the mutex");
+        });
+        assert!(pending.is_poisoned(), "test setup: lock must be poisoned");
+
+        let reservation = ResumeReservation {
+            pending: Arc::clone(&pending),
+            session_id: "s-poison".into(),
+        };
+        drop(reservation);
+
+        let map = pending.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !map.contains_key("s-poison"),
+            "Drop must recover the poisoned lock and remove the reservation"
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_during_pending_spawn_marks_for_cancellation() {
         let sink = VecSink::new();
@@ -2635,7 +2698,7 @@ mod tests {
         // and the late spawn completion installed an orphan.
         sup.pending_resumes
             .lock()
-            .await
+            .unwrap()
             .insert("s-cancel".into(), ResumeKind::Spawn);
         assert!(sup.is_running("s-cancel").await);
 
@@ -2646,7 +2709,7 @@ mod tests {
             .await
             .expect("shutdown of pending spawn should succeed");
         assert!(
-            sup.cancelled_spawns.lock().await.contains("s-cancel"),
+            sup.cancelled_spawns.lock().unwrap().contains("s-cancel"),
             "shutdown must mark the pending spawn for cancellation"
         );
 
@@ -2950,11 +3013,11 @@ mod tests {
 
         sup.pending_resumes
             .lock()
-            .await
+            .unwrap()
             .insert("s-spawn".into(), ResumeKind::Spawn);
         sup.pending_resumes
             .lock()
-            .await
+            .unwrap()
             .insert("s-attach".into(), ResumeKind::Attach);
 
         assert_eq!(
@@ -2988,11 +3051,11 @@ mod tests {
         // check and are mid-handshake.
         sup.pending_resumes
             .lock()
-            .await
+            .unwrap()
             .insert("s-a".into(), ResumeKind::Spawn);
         sup.pending_resumes
             .lock()
-            .await
+            .unwrap()
             .insert("s-b".into(), ResumeKind::Spawn);
 
         // A third spawn must fail the capacity check rather than slip
@@ -3040,7 +3103,7 @@ mod tests {
 
         sup.pending_resumes
             .lock()
-            .await
+            .unwrap()
             .insert("s-attach".into(), ResumeKind::Attach);
 
         // With max=1 and one Attach pending, a fresh spawn for a
