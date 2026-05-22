@@ -623,6 +623,89 @@ describe("useTerminal lifecycle", () => {
     }
   });
 
+  it("kills macOS trackpad momentum once the cursor leaves the preview pane", async () => {
+    // After a flick on the terminal, macOS keeps dispatching wheel
+    // events for the decaying momentum to whatever element the cursor
+    // is currently over. If the user moves the cursor onto the session
+    // list mid-flick, the sidebar (overflow-y-auto) would scroll. The
+    // hook installs a window-level capture wheel listener that blocks
+    // off-pane wheels while a momentum window from an in-pane wheel is
+    // still open.
+    const div = document.createElement("div");
+    document.body.appendChild(div);
+    const outside = document.createElement("div");
+    document.body.appendChild(outside);
+    try {
+      renderHook(() => {
+        const term = useTerminal("s-momentum", "ws", false, false);
+        if (term.containerRef && !term.containerRef.current) {
+          (
+            term.containerRef as unknown as { current: HTMLDivElement | null }
+          ).current = div;
+        }
+        return term;
+      });
+      await flushAsync();
+
+      // Arm the guard with a wheel inside the terminal. The custom
+      // wheel handler also re-arms it, but in the jsdom mock that path
+      // requires the handler to be invoked directly; dispatching a real
+      // event on the xterm element exercises the capture-phase
+      // listener that the hook wires up.
+      const term = document.querySelector(".xterm") as HTMLElement;
+      expect(term).not.toBeNull();
+      act(() => {
+        term.dispatchEvent(
+          new WheelEvent("wheel", {
+            deltaY: -120,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      // Within the momentum window, a wheel event landing outside the
+      // terminal must be cancelled and prevented from bubbling.
+      const offPane = new WheelEvent("wheel", {
+        deltaY: -120,
+        bubbles: true,
+        cancelable: true,
+      });
+      let outsideReachedBubble = false;
+      const bubbleSpy = () => {
+        outsideReachedBubble = true;
+      };
+      outside.addEventListener("wheel", bubbleSpy);
+      try {
+        act(() => {
+          outside.dispatchEvent(offPane);
+        });
+      } finally {
+        outside.removeEventListener("wheel", bubbleSpy);
+      }
+      expect(offPane.defaultPrevented).toBe(true);
+      expect(outsideReachedBubble).toBe(false);
+
+      // After the guard window expires, a fresh wheel on the same
+      // outside element is allowed through.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      const fresh = new WheelEvent("wheel", {
+        deltaY: -120,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        outside.dispatchEvent(fresh);
+      });
+      expect(fresh.defaultPrevented).toBe(false);
+    } finally {
+      div.remove();
+      outside.remove();
+    }
+  });
+
   it("re-reads --term-* CSS vars when aoe:theme-changed fires", async () => {
     const div = document.createElement("div");
     document.body.appendChild(div);

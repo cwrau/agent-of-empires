@@ -1093,19 +1093,55 @@ export function useTerminal(
     let scrollWheelAccum = 0;
     let wheelPersistTimer: ReturnType<typeof setTimeout> | null = null;
     let lastCapturedWheelCell: { col: number; row: number } | null = null;
+
+    // macOS trackpad post-flick momentum is dispatched by the OS to
+    // whichever element the cursor is over. Without this guard, a flick
+    // started in the terminal would silently jump the session list the
+    // moment the cursor moved off the pane while momentum was still
+    // decaying. We arm a short-lived guard on every wheel inside the
+    // terminal, then a window-level capture listener kills any wheel
+    // event landing outside the terminal while the guard is active.
+    // Each blocked event re-arms the guard, so a continuous momentum
+    // chain stays blocked until the OS lets it die. A fresh, intentional
+    // scroll on the sidebar arrives with a >MOMENTUM_GUARD_MS gap and
+    // passes through.
+    const MOMENTUM_GUARD_MS = 150;
+    let momentumGuardTimer: ReturnType<typeof setTimeout> | null = null;
+    const armMomentumGuard = () => {
+      if (momentumGuardTimer) clearTimeout(momentumGuardTimer);
+      momentumGuardTimer = setTimeout(() => {
+        momentumGuardTimer = null;
+      }, MOMENTUM_GUARD_MS);
+    };
+
     const onWheelCapture = (e: WheelEvent) => {
       lastCapturedWheelCell = cellFromClientPoint(
         e.clientX,
         e.clientY,
         e.currentTarget ?? e.target,
       );
+      armMomentumGuard();
     };
     viewport.addEventListener("wheel", onWheelCapture, {
       capture: true,
       passive: true,
     });
+    const onWindowWheelGuard = (e: WheelEvent) => {
+      // Allow wheels targeting the terminal viewport; the terminal's own
+      // handler will re-arm the guard via onWheelCapture.
+      if (viewport.contains(e.target as Node)) return;
+      if (momentumGuardTimer === null) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      armMomentumGuard();
+    };
+    window.addEventListener("wheel", onWindowWheelGuard, {
+      capture: true,
+      passive: false,
+    });
     term.attachCustomWheelEventHandler((e: WheelEvent) => {
       e.preventDefault();
+      armMomentumGuard();
 
       if (e.ctrlKey) {
         // Trackpad pinch fires wheel events with ctrlKey=true
@@ -1224,6 +1260,8 @@ export function useTerminal(
       viewport.removeEventListener("touchcancel", onTouchEnd, touchOpts);
       viewport.removeEventListener("click", onClickCapture, true);
       viewport.removeEventListener("wheel", onWheelCapture, true);
+      window.removeEventListener("wheel", onWindowWheelGuard, true);
+      if (momentumGuardTimer) clearTimeout(momentumGuardTimer);
       if (wheelPersistTimer) clearTimeout(wheelPersistTimer);
       if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
       if (fontSizeRaf !== null) cancelAnimationFrame(fontSizeRaf);
