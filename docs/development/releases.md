@@ -9,7 +9,7 @@ How `agent-of-empires` ships. Maintainer-facing reference for the weekly automat
 - Default semver bump is **patch**. The maintainer reviews the PR, optionally edits the version bump on the branch (patch -> minor / major), then clicks merge.
 - Merging the PR fires `.github/workflows/tag-release-pr.yml`, which tags the merge commit. The tag push triggers `.github/workflows/release.yml`, which builds the four platform binaries and publishes the GitHub release + ClawHub artifact.
 
-The staging PR body currently embeds a plain newest-first commit list. A richer conventional-commit grouped changelog (via [git-cliff](https://github.com/orhun/git-cliff)) is queued for #1387.
+The staging PR body still embeds a plain newest-first commit list for the maintainer's review. The user-facing `CHANGELOG.md` and GitHub Release body are now generated separately by [git-cliff](https://github.com/orhun/git-cliff), grouped by conventional-commit prefix; see [`cliff.toml`](../../cliff.toml) and the "Changelog visibility" section of [`CONTRIBUTING.md`](../../CONTRIBUTING.md). Folding the staging PR body into the same grouped view remains on the to-do list under #1387.
 
 The maintainer's only manual step on a normal release is: review the PR, optionally edit the version bump, click merge.
 
@@ -28,13 +28,14 @@ The workflow:
 1. Reads the current version from `Cargo.toml`.
 2. Computes the next version based on the bump (defaults to patch).
 3. Refuses to run if the tag or the staging branch already exists.
-4. Bumps `Cargo.toml` + `Cargo.lock` on a new branch `release-staging/vX.Y.Z`.
-5. Dumps every commit since the last `v*` tag (newest first, `--no-merges`, with author + short SHA + date) into the PR body. Conventional-commit grouping lands with #1387 once `git-cliff` is wired up.
-6. Opens the PR labeled `release-staging`, with a `<!-- release-version: X.Y.Z -->` marker in the body.
+4. Bumps `Cargo.toml` + `Cargo.lock` on a new branch `release-staging/vX.Y.Z` via `cargo set-version` + `cargo generate-lockfile`.
+5. Regenerates `CHANGELOG.md` via `git cliff --tag vX.Y.Z` and stages it in the same release commit so the staging PR shows the changelog diff for review.
+6. Dumps every commit since the last `v*` tag (newest first, `--no-merges`, with author + short SHA + date) into the PR body as a separate maintainer-review summary. Folding that summary into the same prefix-grouped git-cliff render is queued under #1387.
+7. Opens the PR labeled `release-staging`, with a `<!-- release-version: X.Y.Z -->` marker in the body.
 
 ### Adjusting the bump in-flight
 
-If the auto-staged version is wrong (e.g., the diff contains a breaking change but the workflow picked patch), edit `Cargo.toml` + `Cargo.lock` on the staging branch and update the marker in the PR body to match. The post-merge tagger reads the version from `Cargo.toml` at the merge commit and cross-checks it against the marker; if they disagree the tag step refuses to run.
+If the auto-staged version is wrong (e.g., the diff contains a breaking change but the workflow picked patch), edit `Cargo.toml` + `Cargo.lock` on the staging branch and update the marker in the PR body to match. Re-run `git cliff --config cliff.toml --tag "vX.Y.Z" --output CHANGELOG.md` on the branch so the changelog header reflects the corrected version. The post-merge tagger reads the version from `Cargo.toml` at the merge commit and cross-checks it against the marker; if they disagree the tag step refuses to run.
 
 ## Post-merge tagging
 
@@ -63,7 +64,7 @@ The original `.github/workflows/prepare-release.yml` is still wired up for emerg
 gh workflow run prepare-release.yml -f version=1.7.2
 ```
 
-This bypasses the staging PR. The `release.yml` build still runs on the tag push as usual.
+This bypasses the staging PR. `prepare-release.yml` regenerates `CHANGELOG.md` from git-cliff and folds it into the same `chore: bump version` commit; `release.yml` builds the binaries and creates the GitHub Release with the per-version body that git-cliff emits via `--current --strip header`.
 
 ## Versioning
 
@@ -77,4 +78,4 @@ If you are uncertain, the safer call is the bigger bump.
 
 ## Out of scope
 
-Auto-generation of the user-facing CHANGELOG.md from conventional commits is a queued follow-up. Right now the changelog body that goes into the PR is meant for the maintainer's review only and is not retained anywhere after merge.
+The staging PR body's plain newest-first commit list is still intended for maintainer review only. Folding that body into the same git-cliff grouped render that drives `CHANGELOG.md` and the Release body is queued under #1387.
