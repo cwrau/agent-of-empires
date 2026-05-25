@@ -4,6 +4,38 @@ All notable changes to Agent of Empires will be documented in this file.
 
 The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [1.9.0](https://github.com/njbrake/agent-of-empires/releases/tag/v1.9.0) - 2026-05-25
+
+
+
+### Bug Fixes
+
+- **ci:** Switch nix-npm-hash bot to PR flow + validate hash on PRs in [#1420](https://github.com/njbrake/agent-of-empires/pull/1420) by [@jerome-benoit](https://github.com/jerome-benoit) ([`3318b17`](https://github.com/njbrake/agent-of-empires/commit/3318b17888fbd7e401d92e3e188e7d5685971cf1))
+- **session:** Cross-process flock around Storage mutators in [#1398](https://github.com/njbrake/agent-of-empires/pull/1398) by [@jerome-benoit](https://github.com/jerome-benoit) ([`b6ecdb4`](https://github.com/njbrake/agent-of-empires/commit/b6ecdb4a59ec3fc7a3ff26ad4fd0c3603fb08a0d))
+- **sandbox:** Inject git safe.directory via env vars to fix dubious ownership error in [#1458](https://github.com/njbrake/agent-of-empires/pull/1458) by [@flpdorea](https://github.com/flpdorea) ([`8bba8ee`](https://github.com/njbrake/agent-of-empires/commit/8bba8ee14ab85d088bc6a4319f392f5eeb5be47a))
+- **update:** Re-check periodically inside the TUI in [#1473](https://github.com/njbrake/agent-of-empires/pull/1473) by [@njbrake](https://github.com/njbrake) ([`4fe2d8b`](https://github.com/njbrake/agent-of-empires/commit/4fe2d8b7965b7a8ad00dd57f62a066c91e66ef04))
+- **hermes:** Implement real pane-based status detection in [#1477](https://github.com/njbrake/agent-of-empires/pull/1477) by [@angelogalanti](https://github.com/angelogalanti) ([`0196150`](https://github.com/njbrake/agent-of-empires/commit/01961509fe93943de59fec217d1385be36c96f47))
+
+
+### Features
+
+- **web:** Cockpit user-story foundation (mandate + harness + app fixes) in [#1443](https://github.com/njbrake/agent-of-empires/pull/1443) by [@Seluj78](https://github.com/Seluj78) ([`f715abb`](https://github.com/njbrake/agent-of-empires/commit/f715abbc2805fcf28ece4994a1b8ca8f4b0642ab))
+- **tui:** Drag list/preview divider, click preview to send, click Yes/No on delete dialog in [#1464](https://github.com/njbrake/agent-of-empires/pull/1464) by [@njbrake](https://github.com/njbrake) ([`210fe21`](https://github.com/njbrake/agent-of-empires/commit/210fe21262a20ea93b41e044568e138e1e9ff8fd))
+- **tui:** Live-send mode — Tab to passthrough keystrokes to a session pane in [#1482](https://github.com/njbrake/agent-of-empires/pull/1482) by [@njbrake](https://github.com/njbrake) ([`3ba5337`](https://github.com/njbrake/agent-of-empires/commit/3ba533719115c005a394dfd4ab8054c206ad3c69))
+
+
+### Other
+
+- Avoid false stale-shell error transitions in [#1433](https://github.com/njbrake/agent-of-empires/pull/1433) by [@MovieHolic-Plex](https://github.com/MovieHolic-Plex) ([`ed8d5ea`](https://github.com/njbrake/agent-of-empires/commit/ed8d5ea84354737e6f536c994a1837b833462774))
+
+
+
+### New Contributors
+
+- [@angelogalanti](https://github.com/angelogalanti) made their first contribution in [#1477](https://github.com/njbrake/agent-of-empires/pull/1477)
+- [@flpdorea](https://github.com/flpdorea) made their first contribution in [#1458](https://github.com/njbrake/agent-of-empires/pull/1458)
+
+**Full Changelog**: https://github.com/njbrake/agent-of-empires/compare/v1.8.1...v1.9.0
 ## [1.8.1](https://github.com/njbrake/agent-of-empires/releases/tag/v1.8.1) - 2026-05-22
 
 
