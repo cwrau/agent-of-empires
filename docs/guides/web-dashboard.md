@@ -264,4 +264,4 @@ For API/WebSocket requests, run the Rust server simultaneously:
 cargo run --features serve -- serve
 ```
 
-The Vite dev server proxies API requests to the Rust server (configure in `vite.config.ts` if needed).
+If you are making only frontend changes and want to work on the local frontend against a "production" backend instead of a local build, set `VITE_PROXY` (shell env or `web/.env`) to that `aoe serve` origin, including a non-cargo install on a custom port, and the dev server forwards `/api` and `/sessions/*/ws` (terminal + cockpit) there: `VITE_PROXY=http://localhost:50106 npm run dev`. Without it the dev server behaves as before; HMR is unaffected either way.
