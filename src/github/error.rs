@@ -6,6 +6,7 @@
 //! `src/git/error.rs` and `src/containers/error.rs`.
 
 use reqwest::StatusCode;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Failures while resolving a GitHub token from the environment or the `gh`
@@ -82,7 +83,15 @@ pub enum GitHubError {
          Wait for the limit to reset (see the X-RateLimit-Reset header) and retry.\n\
          Authenticating raises the limit: set GITHUB_TOKEN or run gh auth login."
     )]
-    RateLimited,
+    RateLimited {
+        /// Seconds to wait from the `Retry-After` header (secondary limits),
+        /// when present. Relative, so no clock is needed to use it.
+        retry_after: Option<Duration>,
+        /// Unix epoch seconds from `X-RateLimit-Reset` (primary limits), when
+        /// present. The poller subtracts its own clock to derive the sleep;
+        /// kept raw here so `classify_status` stays pure and header-driven.
+        reset_epoch: Option<u64>,
+    },
 
     #[error("GitHub resource not found: {resource}")]
     NotFound { resource: String },

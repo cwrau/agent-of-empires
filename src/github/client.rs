@@ -39,6 +39,75 @@ pub struct GitHubRelease {
     pub published_at: Option<String>,
 }
 
+/// One side of a pull request's branch ref (`head` or `base`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PullBranchRef {
+    /// Short branch name, e.g. `feature/x`.
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    /// Commit SHA at the tip of that branch. Used as the git ref for
+    /// check-runs lookups.
+    pub sha: String,
+}
+
+/// A pull request as returned by the list endpoint
+/// (`GET /repos/{o}/{r}/pulls`). Mergeability is absent here; fetch
+/// [`PullDetails`] via [`GitHubClient::get_pull`] for that.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PullRef {
+    pub number: u64,
+    /// `"open"` or `"closed"`.
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    pub title: String,
+    pub html_url: String,
+    pub head: PullBranchRef,
+    pub base: PullBranchRef,
+}
+
+/// A pull request as returned by the single-PR endpoint
+/// (`GET /repos/{o}/{r}/pulls/{n}`), which carries merge state the list
+/// endpoint omits.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PullDetails {
+    pub number: u64,
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub merged: bool,
+    /// GitHub's computed mergeability label (`"clean"`, `"dirty"`,
+    /// `"blocked"`, `"behind"`, ...). `null` while GitHub is still
+    /// computing it just after a push, hence `Option`.
+    #[serde(default)]
+    pub mergeable_state: Option<String>,
+    pub title: String,
+    pub html_url: String,
+    pub head: PullBranchRef,
+    pub base: PullBranchRef,
+}
+
+/// One check run from `GET /repos/{o}/{r}/commits/{ref}/check-runs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckRun {
+    pub name: String,
+    /// `"queued"`, `"in_progress"`, or `"completed"`.
+    pub status: String,
+    /// Set once `status == "completed"`: `"success"`, `"failure"`,
+    /// `"neutral"`, `"cancelled"`, `"skipped"`, `"timed_out"`,
+    /// `"action_required"`.
+    #[serde(default)]
+    pub conclusion: Option<String>,
+}
+
+/// Response envelope for the check-runs endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckRunsResponse {
+    pub total_count: u64,
+    pub check_runs: Vec<CheckRun>,
+}
+
 #[derive(Deserialize)]
 struct ApiErrorBody {
     message: Option<String>,
@@ -106,6 +175,56 @@ impl GitHubClient {
         self.send_json(self.http.get(url)).await
     }
 
+    /// Open pull requests whose head is `{owner}:{branch}`.
+    ///
+    /// `GET /repos/{owner}/{repo}/pulls?state=open&head={owner}:{branch}`.
+    /// The `head` filter only matches same-owner branches, so PRs opened
+    /// from a fork are not returned. Branch names may contain `/`, so the
+    /// query is built with [`reqwest::RequestBuilder::query`] rather than
+    /// string interpolation.
+    pub async fn list_open_pulls_for_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Vec<PullRef>> {
+        let url = format!("{}/repos/{}/{}/pulls", self.api_base, owner, repo);
+        let head = format!("{owner}:{branch}");
+        let request = self
+            .http
+            .get(url)
+            .query(&[("state", "open"), ("head", head.as_str())]);
+        self.send_json(request).await
+    }
+
+    /// `GET /repos/{owner}/{repo}/pulls/{number}` for merge state the list
+    /// endpoint omits.
+    pub async fn get_pull(&self, owner: &str, repo: &str, number: u64) -> Result<PullDetails> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}",
+            self.api_base, owner, repo, number
+        );
+        self.send_json(self.http.get(url)).await
+    }
+
+    /// Check runs for a git ref (commit SHA or branch).
+    ///
+    /// `GET /repos/{owner}/{repo}/commits/{git_ref}/check-runs`. This covers
+    /// the modern Checks API only; legacy Commit Status contexts are not
+    /// aggregated (documented limitation, tracked for a follow-up).
+    pub async fn list_check_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+    ) -> Result<CheckRunsResponse> {
+        let url = format!(
+            "{}/repos/{}/{}/commits/{}/check-runs",
+            self.api_base, owner, repo, git_ref
+        );
+        self.send_json(self.http.get(url)).await
+    }
+
     async fn send_json<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T> {
         let response = request.send().await.map_err(classify_transport_error)?;
         let status = response.status();
@@ -131,10 +250,10 @@ fn classify_transport_error(error: reqwest::Error) -> GitHubError {
 fn classify_status(status: StatusCode, headers: &HeaderMap, body: &str) -> GitHubError {
     match status {
         StatusCode::UNAUTHORIZED => GitHubError::Unauthorized,
-        StatusCode::TOO_MANY_REQUESTS => GitHubError::RateLimited,
+        StatusCode::TOO_MANY_REQUESTS => rate_limited(headers),
         StatusCode::FORBIDDEN => {
             if is_rate_limited(headers) {
-                GitHubError::RateLimited
+                rate_limited(headers)
             } else if let Some(scopes) = missing_scope(headers, body) {
                 GitHubError::InsufficientScope { scopes }
             } else {
@@ -151,6 +270,27 @@ fn classify_status(status: StatusCode, headers: &HeaderMap, body: &str) -> GitHu
             status,
             message: api_message(body),
         },
+    }
+}
+
+/// Build a [`GitHubError::RateLimited`] carrying whatever retry timing the
+/// response advertised. `Retry-After` is relative seconds (secondary limits);
+/// `X-RateLimit-Reset` is an absolute Unix epoch (primary limits). Both are
+/// passed through raw so this stays a pure, clock-free transform; the poller
+/// resolves them against its own clock.
+fn rate_limited(headers: &HeaderMap) -> GitHubError {
+    let retry_after = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let reset_epoch = headers
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    GitHubError::RateLimited {
+        retry_after,
+        reset_epoch,
     }
 }
 
@@ -288,15 +428,81 @@ mod tests {
 
     #[test]
     fn forbidden_rate_limited_maps_to_rate_limited() {
-        let headers = headers_with(&[("x-ratelimit-remaining", "0")]);
+        let headers = headers_with(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "999")]);
         let err = classify_status(StatusCode::FORBIDDEN, &headers, "");
-        assert!(matches!(err, GitHubError::RateLimited));
+        match err {
+            GitHubError::RateLimited {
+                reset_epoch,
+                retry_after,
+            } => {
+                assert_eq!(reset_epoch, Some(999));
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 
     #[test]
-    fn too_many_requests_maps_to_rate_limited() {
-        let err = classify_status(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new(), "");
-        assert!(matches!(err, GitHubError::RateLimited));
+    fn too_many_requests_carries_retry_after() {
+        let headers = headers_with(&[("retry-after", "42")]);
+        let err = classify_status(StatusCode::TOO_MANY_REQUESTS, &headers, "");
+        match err {
+            GitHubError::RateLimited { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(42)));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_ref_decodes_list_payload() {
+        let json = r#"[{
+            "number": 7,
+            "state": "open",
+            "draft": false,
+            "title": "Add thing",
+            "html_url": "https://github.com/o/r/pull/7",
+            "head": { "ref": "feature/x", "sha": "abc123" },
+            "base": { "ref": "main", "sha": "def456" }
+        }]"#;
+        let prs: Vec<PullRef> = serde_json::from_str(json).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 7);
+        assert_eq!(prs[0].head.ref_name, "feature/x");
+        assert_eq!(prs[0].head.sha, "abc123");
+    }
+
+    #[test]
+    fn pull_details_decodes_null_mergeable_state() {
+        let json = r#"{
+            "number": 7,
+            "state": "open",
+            "draft": true,
+            "merged": false,
+            "mergeable_state": null,
+            "title": "WIP",
+            "html_url": "https://github.com/o/r/pull/7",
+            "head": { "ref": "x", "sha": "s" },
+            "base": { "ref": "main", "sha": "b" }
+        }"#;
+        let pr: PullDetails = serde_json::from_str(json).unwrap();
+        assert!(pr.draft);
+        assert!(!pr.merged);
+        assert!(pr.mergeable_state.is_none());
+    }
+
+    #[test]
+    fn check_runs_decode_with_missing_conclusion() {
+        let json = r#"{
+            "total_count": 2,
+            "check_runs": [
+                { "name": "build", "status": "completed", "conclusion": "success" },
+                { "name": "test", "status": "in_progress" }
+            ]
+        }"#;
+        let resp: CheckRunsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total_count, 2);
+        assert_eq!(resp.check_runs[1].conclusion, None);
     }
 
     #[test]

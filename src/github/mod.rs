@@ -13,7 +13,10 @@ pub mod client;
 pub mod error;
 
 pub use auth::{resolve_token, resolve_token_from_system, ResolvedToken, TokenSource};
-pub use client::{GitHubClient, GitHubClientConfig, GitHubRelease};
+pub use client::{
+    CheckRun, CheckRunsResponse, GitHubClient, GitHubClientConfig, GitHubRelease, PullBranchRef,
+    PullDetails, PullRef,
+};
 pub use error::{GitHubAuthError, GitHubError, Result};
 
 /// Default GitHub REST API base.
