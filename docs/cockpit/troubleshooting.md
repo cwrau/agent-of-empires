@@ -174,6 +174,16 @@ The same hand-off is available at any time, not just when an agent is rate-limit
 
 Both paths hit `POST /api/sessions/{id}/cockpit/switch-agent` with `reason: "manual"`, so the transcript divider reads `Switched cockpit agent from <from> to <to> (manual)`, distinct from the `(rate_limited)` divider the recovery flow emits.
 
+### Provider auth-invalid (invalid or expired API key)
+
+When the active ACP backend rejects `session/prompt` with a non-retryable provider auth error (for example Gemini returning `API_KEY_INVALID` / "API key expired. Please renew the API key."), aoe treats it as a parked terminal state, the same class as a rate-limit, rather than as a worker crash:
+
+- The connection task classifies the structured error (the provider's `reason` code first, then a tight message fingerprint, with rate-limit shadowed so a rate-limit is never misread as an auth failure) and emits a typed `ProviderAuthInvalid` event plus a `Stopped { reason: "provider_auth_invalid" }` lifecycle event, then exits cleanly. The free-form `AgentStartupError` is suppressed on this path.
+- The supervisor drops the worker handle and does NOT respawn. Earlier behaviour respawned the runner, hit the identical bad-key failure on the next `session/prompt`, and burned the restart budget before parking the session with generic crash semantics.
+- The dashboard shows a remediation banner whose copy is keyed off the active agent, so a Gemini session points at renewing `GEMINI_API_KEY` (and a Claude session at `ANTHROPIC_API_KEY` / `claude /login`), never the wrong provider's instructions.
+
+The key is validated at prompt time, not at handshake, so the banner does not clear on a respawn or reconnect. After you renew or replace the key out of band, retry: the banner clears on the next successful turn (`Stopped { reason: "prompt_complete" }`). A manual "Dismiss" hides it locally in the meantime, and the "Switch agent" hand-off above stays available if you would rather move to a different backend.
+
 ### Native binary launch failure
 
 When the cockpit banner shows an error of the form
