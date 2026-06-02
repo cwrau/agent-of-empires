@@ -211,9 +211,12 @@ impl GitHubClient {
     ///
     /// `GET /repos/{owner}/{repo}/commits/{git_ref}/check-runs`. Pass a commit
     /// SHA: `git_ref` is interpolated into the path, so a branch name
-    /// containing `/` would break the URL. This covers the modern Checks API
-    /// only; legacy Commit Status contexts are not aggregated (documented
-    /// limitation, tracked for a follow-up).
+    /// containing `/` would break the URL. Paginates at 100 per page until
+    /// `total_count` runs have been collected, so a commit with more than one
+    /// page of checks is not silently truncated (which would skew the CI
+    /// aggregate). Covers the modern Checks API only; legacy Commit Status
+    /// contexts are not aggregated (documented limitation, tracked for a
+    /// follow-up).
     pub async fn list_check_runs(
         &self,
         owner: &str,
@@ -224,7 +227,31 @@ impl GitHubClient {
             "{}/repos/{}/{}/commits/{}/check-runs",
             self.api_base, owner, repo, git_ref
         );
-        self.send_json(self.http.get(url)).await
+
+        let mut collected: Vec<CheckRun> = Vec::new();
+        let mut total_count = 0u64;
+        let mut page = 1u32;
+        loop {
+            let request = self
+                .http
+                .get(&url)
+                .query(&[("per_page", "100".to_string()), ("page", page.to_string())]);
+            let resp: CheckRunsResponse = self.send_json(request).await?;
+            total_count = resp.total_count;
+            let returned = resp.check_runs.len();
+            collected.extend(resp.check_runs);
+            // Stop when we have them all, or when a page comes back empty
+            // (defensive: a lying total_count must not loop forever).
+            if returned == 0 || collected.len() as u64 >= total_count {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(CheckRunsResponse {
+            total_count,
+            check_runs: collected,
+        })
     }
 
     async fn send_json<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T> {
