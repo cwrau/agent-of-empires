@@ -1097,6 +1097,7 @@ impl SettingsView {
             | FieldKey::LoggingMaxSizeMib
             | FieldKey::LoggingKeepCount
             | FieldKey::LoggingShowSpans
+            | FieldKey::TelemetryEnabled
             | FieldKey::SessionIdPollerMaxThreads => {}
             FieldKey::HostEnvironment => {
                 config.environment = None;
