@@ -50,7 +50,16 @@ closed, versioned schema (see `src/telemetry/events.rs`):
     counted (populated by `aoe serve`; the TUI reports `0`),
   - which opt-in features are turned on (see "Feature flags" below),
   - which surfaces were opened since the last snapshot, as a `usage_seen` map
-    of allowlisted signal name to open-count (see "Usage signals" below),
+    of allowlisted signal name to open-count (see "Usage signals" below). For
+    the web dashboard and cockpit, a coarse client form-factor class is also
+    reported per surface (`web_clients_seen` / `cockpit_clients_seen`, each a
+    was-seen flag over `desktop` / `desktop_pwa` / `mobile` / `mobile_pwa`) so
+    desktop, mobile, and installed-PWA usage can be told apart. It is never a
+    per-device id: the snapshot's `os` / `arch` describe the daemon host, not
+    the client, so without this a phone PWA talking to a desktop daemon looked
+    like a desktop client. Only the coarse class is derived (from display-mode,
+    pointer type, and viewport width); no user-agent string, screen size, or
+    device model is read or sent,
   - for `aoe serve` only, how the daemon is deployed, decided once at launch:
     its auth mode (`token`, `passphrase`, or `none`) and its exposure mode
     (`tunnel` for a Cloudflare quick or named tunnel, `tailscale` for a
@@ -191,10 +200,10 @@ until delivery is confirmed, so a failed send does not silently drop them:
   both the slot and the counts intact for the next invocation to retry (bounded
   to once per hour so a down endpoint cannot make every `aoe` invocation
   re-send), and a transient failure never drops a window of commands;
-- the serve `usage_seen` open counts and the session-create counter are cleared
-  only after a confirmed snapshot send, decremented by exactly what was reported,
-  so a failed snapshot keeps them for the next one instead of losing that
-  window's signal.
+- the serve `usage_seen` open counts, the per-form-factor client maps, and the
+  session-create counter are cleared only after a confirmed snapshot send,
+  decremented by exactly what was reported, so a failed snapshot keeps them for
+  the next one instead of losing that window's signal.
 
 This is coarse, last-write retry, not a durable queue: periodic snapshots are
 still point-in-time, and a snapshot identical to the last confirmed one is
@@ -217,9 +226,11 @@ the install id and does all sending.
 **Schema contract.** The wire format is the flat, closed schema in
 `src/telemetry/events.rs`, mirrored by the gateway. New fields must be counts,
 booleans, or short identifier-like strings (and the allowlisted bucket maps:
-per-agent, per-model-family, and per-substrate); the gateway drops free text,
-paths, branch-name-like strings, and any nested object, so anything richer than
-a count or flag will not survive ingest.
+per-agent, per-model-family, per-substrate, the `usage_seen` open counts, and the
+`web_clients_seen` / `cockpit_clients_seen` form-factor maps, all keyed by short
+identifiers with numeric or boolean values); the gateway drops free text, paths,
+branch-name-like strings, and any nested object, so anything richer than a count
+or flag will not survive ingest.
 
 **Idempotency key.** The `process_start` and `usage_snapshot` events carry a
 per-event `uuid`, a random v4 UUID minted once when the event is built. It is

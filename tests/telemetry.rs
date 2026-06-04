@@ -171,6 +171,58 @@ fn snapshot_buckets_are_sanitized() {
     }
 }
 
+/// User story (#1883): the snapshot's per-class client form-factor maps are a
+/// presence set on the wire. Only seen classes appear (as `true`); a never-seen
+/// class is absent (not `false`); and an empty map is omitted entirely rather
+/// than serialized as `{}`. The daemon fills these in `build_serve_snapshot`
+/// from its client counters; the form-factor classification and allowlist are
+/// unit-tested in `telemetry::form_factor`, and the end-to-end seen-ping path is
+/// covered by the live Playwright `telemetry-form-factor` spec.
+#[test]
+#[serial]
+fn form_factor_maps_are_a_presence_set_on_the_wire() {
+    let _tmp = isolate();
+    set_enabled(true);
+    telemetry::apply_opt_in_change(true);
+
+    // A fresh serve snapshot has no classified opens, so both maps are empty and
+    // must be omitted from the wire (not emitted as `{}`).
+    let mut snapshot = telemetry::build_usage_snapshot(
+        Surface::Serve,
+        &[],
+        usage_signals::zeroed(),
+        0,
+        None,
+        None,
+    )
+    .expect("snapshot built when opted in");
+    let empty_wire = serde_json::to_string(&snapshot).expect("serialize");
+    assert!(
+        !empty_wire.contains("web_clients_seen"),
+        "empty web_clients_seen must be skipped, not emitted as {{}}"
+    );
+    assert!(
+        !empty_wire.contains("cockpit_clients_seen"),
+        "empty cockpit_clients_seen must be skipped, not emitted as {{}}"
+    );
+
+    // With classes recorded (as the daemon would from its client counters), the
+    // map carries exactly the seen classes as `true`; never-seen classes stay
+    // absent, so it remains a small presence set.
+    snapshot
+        .web_clients_seen
+        .insert("desktop".to_string(), true);
+    snapshot
+        .web_clients_seen
+        .insert("mobile_pwa".to_string(), true);
+    assert_eq!(snapshot.web_clients_seen.get("desktop"), Some(&true));
+    assert_eq!(snapshot.web_clients_seen.get("mobile_pwa"), Some(&true));
+    assert_eq!(snapshot.web_clients_seen.get("mobile"), None);
+    let wire = serde_json::to_string(&snapshot).expect("serialize");
+    assert!(wire.contains("web_clients_seen"));
+    assert!(wire.contains("mobile_pwa"));
+}
+
 /// The fixed, closed substrate vocabulary (#1886). The snapshot must never
 /// emit a key outside this set.
 const SUBSTRATE_VOCAB: [&str; 5] = ["local", "worktree", "workspace", "sandbox", "scratch"];

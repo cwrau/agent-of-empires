@@ -20,6 +20,7 @@
 
 pub mod events;
 pub mod features;
+pub mod form_factor;
 pub mod sanitize;
 mod state;
 pub mod usage_signals;
@@ -28,6 +29,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub use events::{CliUsage, ProcessStart, Surface, UsageSnapshot, SCHEMA_VERSION};
+pub use form_factor::WebClientFormFactor;
 pub use state::{
     cli_usage_due, ensure_install_id, install_id, record_cli_command, record_cli_usage_flush,
     reset_install_id,
@@ -444,6 +446,11 @@ fn assemble_usage_snapshot(
         sessions_by_substrate: metrics.by_substrate,
         features,
         usage_seen,
+        // Serve-only per-form-factor maps; the disk-free assembler leaves them
+        // empty and `build_serve_snapshot` fills them from the daemon's client
+        // counters after assembly. Always empty for TUI/CLI (no web client).
+        web_clients_seen: BTreeMap::new(),
+        cockpit_clients_seen: BTreeMap::new(),
         session_creates_since_last_snapshot,
         // Set by `build_usage_snapshot` for the serve surface; the pure
         // assembler leaves them unset.
@@ -749,6 +756,8 @@ mod tests {
             sessions_by_substrate: SUBSTRATES.iter().map(|s| (s.to_string(), 0)).collect(),
             features: BTreeMap::new(),
             usage_seen: usage_signals::zeroed(),
+            web_clients_seen: BTreeMap::new(),
+            cockpit_clients_seen: BTreeMap::new(),
             session_creates_since_last_snapshot: 0,
             auth_mode: None,
             serve_mode: None,

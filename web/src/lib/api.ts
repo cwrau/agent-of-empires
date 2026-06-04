@@ -1,3 +1,4 @@
+import { clientFormFactor } from "./formFactor";
 import type {
   SessionResponse,
   RichDiffFilesResponse,
@@ -445,12 +446,15 @@ export async function setTelemetryConsent(
 }
 
 /// Tell the daemon the web dashboard or cockpit UI was opened, so its next
-/// opt-in snapshot can carry the `usage_seen` open-count map. Best-effort.
+/// opt-in snapshot can carry the `usage_seen` open-count map plus the coarse
+/// client form-factor class (#1883). Best-effort. The browser never posts to the
+/// telemetry backend; it pings the local daemon, which folds both into its own
+/// snapshot.
 export function reportTelemetrySeen(surface: "web" | "cockpit"): void {
   void fetch("/api/telemetry/seen", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ surface }),
+    body: JSON.stringify({ surface, form_factor: clientFormFactor() }),
   }).catch(() => {});
 }
 

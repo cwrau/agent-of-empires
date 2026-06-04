@@ -350,6 +350,14 @@ pub struct AppState {
     /// daemon (`POST /api/telemetry/seen`), which folds the count in here.
     /// Instrumenting a new surface is one entry in `telemetry::usage_signals`.
     pub telemetry_usage_seen: crate::telemetry::usage_signals::UsageSeenCounters,
+    /// Per-form-factor open counts for the web dashboard / cockpit, layered on
+    /// the `usage_seen` registry counts above so the snapshot can report which
+    /// client classes (desktop / mobile / PWA) used each surface. The registry
+    /// counts the open; a classified open additionally bumps the matching class
+    /// here. An unclassified open (older frontend, no `form_factor`) is counted
+    /// only by the registry. See `telemetry::form_factor` and #1883.
+    pub telemetry_web_clients: FormFactorCounters,
+    pub telemetry_cockpit_clients: FormFactorCounters,
     /// Sessions created since the last opt-in telemetry snapshot. Feeds the
     /// `session_creates_since_last_snapshot` trend counter so short-lived sessions
     /// that start and end between two snapshots are still counted. Decremented (by
@@ -851,6 +859,8 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         web_config: config.web.clone(),
         last_web_activity: std::sync::atomic::AtomicI64::new(0),
         telemetry_usage_seen: crate::telemetry::usage_signals::UsageSeenCounters::new(),
+        telemetry_web_clients: FormFactorCounters::default(),
+        telemetry_cockpit_clients: FormFactorCounters::default(),
         telemetry_session_creates: std::sync::atomic::AtomicU32::new(0),
         telemetry_last_reported: std::sync::Mutex::new(None),
         shutdown: CancellationToken::new(),
@@ -1744,11 +1754,117 @@ fn spawn_serve_snapshot_loop(state: Arc<AppState>) {
     });
 }
 
+/// Per-form-factor open counters for one web surface (dashboard or cockpit).
+/// A fixed, lock-free set over the closed [`crate::telemetry::WebClientFormFactor`]
+/// allowlist: the seen endpoint increments the matching class, the snapshot
+/// reads exact counts, and a confirmed send decrements by exactly what it
+/// reported (so an open landing during an in-flight send survives, mirroring
+/// the coarse `telemetry_web_seen` counter). Named fields rather than a map so
+/// no free-form string key can ever enter daemon state.
+#[derive(Default)]
+pub struct FormFactorCounters {
+    desktop: std::sync::atomic::AtomicU32,
+    desktop_pwa: std::sync::atomic::AtomicU32,
+    mobile: std::sync::atomic::AtomicU32,
+    mobile_pwa: std::sync::atomic::AtomicU32,
+}
+
+impl FormFactorCounters {
+    fn field(&self, ff: crate::telemetry::WebClientFormFactor) -> &std::sync::atomic::AtomicU32 {
+        use crate::telemetry::WebClientFormFactor::*;
+        match ff {
+            Desktop => &self.desktop,
+            DesktopPwa => &self.desktop_pwa,
+            Mobile => &self.mobile,
+            MobilePwa => &self.mobile_pwa,
+        }
+    }
+
+    /// Record one classified open of the given client class.
+    pub fn increment(&self, ff: crate::telemetry::WebClientFormFactor) {
+        self.field(ff)
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Point-in-time read of every class count, so the snapshot loop can later
+    /// decrement by exactly the values it reported.
+    fn read(&self) -> FormFactorCounts {
+        use std::sync::atomic::Ordering;
+        let mut counts = FormFactorCounts::default();
+        for ff in crate::telemetry::WebClientFormFactor::ALL {
+            counts.set(ff, self.field(ff).load(Ordering::Relaxed));
+        }
+        counts
+    }
+
+    /// Subtract exactly the reported counts after a confirmed send. Never zeroes,
+    /// so an open that landed mid-send rolls into the next snapshot.
+    fn decrement(&self, reported: &FormFactorCounts) {
+        for ff in crate::telemetry::WebClientFormFactor::ALL {
+            let n = reported.get(ff);
+            if n > 0 {
+                self.field(ff)
+                    .fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// A snapshot's reported per-class counts. Plain values (not atomics) so they
+/// can be stashed in [`ReportedServeSignals`] and replayed on confirm.
+#[derive(Default, Clone, Copy)]
+struct FormFactorCounts {
+    desktop: u32,
+    desktop_pwa: u32,
+    mobile: u32,
+    mobile_pwa: u32,
+}
+
+impl FormFactorCounts {
+    fn slot(&mut self, ff: crate::telemetry::WebClientFormFactor) -> &mut u32 {
+        use crate::telemetry::WebClientFormFactor::*;
+        match ff {
+            Desktop => &mut self.desktop,
+            DesktopPwa => &mut self.desktop_pwa,
+            Mobile => &mut self.mobile,
+            MobilePwa => &mut self.mobile_pwa,
+        }
+    }
+
+    fn set(&mut self, ff: crate::telemetry::WebClientFormFactor, n: u32) {
+        *self.slot(ff) = n;
+    }
+
+    fn get(&self, ff: crate::telemetry::WebClientFormFactor) -> u32 {
+        match ff {
+            crate::telemetry::WebClientFormFactor::Desktop => self.desktop,
+            crate::telemetry::WebClientFormFactor::DesktopPwa => self.desktop_pwa,
+            crate::telemetry::WebClientFormFactor::Mobile => self.mobile,
+            crate::telemetry::WebClientFormFactor::MobilePwa => self.mobile_pwa,
+        }
+    }
+
+    /// Per-class was-seen map for the snapshot wire: only classes with a
+    /// positive count appear, each as `true`. Empty (and so omitted) when no
+    /// classified client opened the surface.
+    fn seen_map(&self) -> std::collections::BTreeMap<String, bool> {
+        let mut map = std::collections::BTreeMap::new();
+        for ff in crate::telemetry::WebClientFormFactor::ALL {
+            if self.get(ff) > 0 {
+                map.insert(ff.key().to_string(), true);
+            }
+        }
+        map
+    }
+}
+
 /// What a serve snapshot reported, so the originating signals can be cleared
 /// only after the send is confirmed. The clear is deferred (rather than reset at
 /// build time) so a failed send retains the signals for the next snapshot.
 struct ReportedServeSignals {
     usage_seen: std::collections::BTreeMap<String, u32>,
+    web_clients: FormFactorCounts,
+    cockpit_clients: FormFactorCounts,
     session_creates: u32,
 }
 
@@ -1760,9 +1876,11 @@ struct ReportedServeSignals {
 async fn build_serve_snapshot(state: &AppState) -> Option<crate::telemetry::UsageSnapshot> {
     use std::sync::atomic::Ordering;
     let usage_seen = state.telemetry_usage_seen.snapshot();
+    let web_clients = state.telemetry_web_clients.read();
+    let cockpit_clients = state.telemetry_cockpit_clients.read();
     let session_creates = state.telemetry_session_creates.load(Ordering::Relaxed);
     let instances = state.instances.read().await.clone();
-    let snapshot = crate::telemetry::build_usage_snapshot(
+    let mut snapshot = crate::telemetry::build_usage_snapshot(
         crate::telemetry::Surface::Serve,
         &instances,
         usage_seen.clone(),
@@ -1770,8 +1888,15 @@ async fn build_serve_snapshot(state: &AppState) -> Option<crate::telemetry::Usag
         Some(state.auth_mode),
         Some(state.serve_mode),
     )?;
+    // Layer the per-form-factor was-seen maps onto the snapshot. They are serve
+    // only (the browser surfaces), so the pure builder leaves them empty and the
+    // daemon fills them here from its client counters.
+    snapshot.web_clients_seen = web_clients.seen_map();
+    snapshot.cockpit_clients_seen = cockpit_clients.seen_map();
     *state.telemetry_last_reported.lock().unwrap() = Some(ReportedServeSignals {
         usage_seen,
+        web_clients,
+        cockpit_clients,
         session_creates,
     });
     Some(snapshot)
@@ -1792,6 +1917,10 @@ fn clear_reported_serve_signals(state: &AppState, outcome: crate::telemetry::Sen
         return;
     }
     state.telemetry_usage_seen.decrement(&reported.usage_seen);
+    state.telemetry_web_clients.decrement(&reported.web_clients);
+    state
+        .telemetry_cockpit_clients
+        .decrement(&reported.cockpit_clients);
     decrement_reported_count(&state.telemetry_session_creates, reported.session_creates);
 }
 
@@ -2810,6 +2939,41 @@ mod tests {
         let counter = AtomicU32::new(3);
         decrement_reported_count(&counter, 0);
         assert_eq!(counter.load(Ordering::Relaxed), 3);
+    }
+
+    // #1883: the per-form-factor counters dedup repeated same-class opens to a
+    // single was-seen entry, and the confirmed-send decrement subtracts exactly
+    // what was reported so a class opened during an in-flight send survives.
+    #[test]
+    fn form_factor_counters_dedup_and_preserve_in_flight_opens() {
+        use crate::telemetry::WebClientFormFactor::{Desktop, MobilePwa};
+
+        let counters = FormFactorCounters::default();
+        // Two desktop opens and one mobile-PWA open before the snapshot builds.
+        counters.increment(Desktop);
+        counters.increment(Desktop);
+        counters.increment(MobilePwa);
+
+        let reported = counters.read();
+        // Repeated same-class pings collapse to one was-seen entry on the wire.
+        let map = reported.seen_map();
+        assert_eq!(map.get("desktop"), Some(&true));
+        assert_eq!(map.get("mobile_pwa"), Some(&true));
+        assert_eq!(map.get("mobile"), None, "unseen classes are absent");
+        assert_eq!(map.len(), 2);
+
+        // A mobile-PWA open lands while the snapshot is in flight.
+        counters.increment(MobilePwa);
+        // The confirmed send clears only the reported counts.
+        counters.decrement(&reported);
+
+        let after = counters.read();
+        assert_eq!(after.get(Desktop), 0, "reported desktop opens cleared");
+        assert_eq!(
+            after.get(MobilePwa),
+            1,
+            "the open that arrived during the send must be retained"
+        );
     }
 
     #[cfg(feature = "serve")]
