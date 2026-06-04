@@ -18,7 +18,9 @@ use serde::Serialize;
 /// v4 (#1931): added `session_pinned` / `session_snoozed` / `session_archived`.
 /// v5 (#1880): replaced the `web_seen` / `cockpit_seen` booleans with the
 /// allowlisted `usage_seen` count map.
-pub const SCHEMA_VERSION: u32 = 5;
+/// v6 (#1933): added the [`CliUsage`] event and retired the `cli`-surface
+/// [`ProcessStart`] in favor of it.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Which surface emitted the event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,8 +44,11 @@ impl Surface {
     }
 }
 
-/// Emitted once on boot. Captures short-lived invocations that a periodic
-/// snapshot would miss. Carries no session details.
+/// Emitted once on boot by the long-running surfaces (TUI, `aoe serve`).
+/// Captures launches that a periodic snapshot would miss. Carries no session
+/// details. Short-lived `aoe <subcommand>` invocations no longer emit this;
+/// they report through [`CliUsage`] instead, which carries the same
+/// "this install ran the CLI" signal plus the per-command mix.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessStart {
     pub schema: u32,
@@ -56,6 +61,39 @@ pub struct ProcessStart {
     pub aoe_version: String,
     pub os: String,
     pub arch: String,
+}
+
+/// Emitted by short-lived `aoe <subcommand>` invocations, throttled to at most
+/// once per install per day. Replaces the `cli`-surface [`ProcessStart`]: a
+/// non-empty `command_counts` carries the same "this install ran the CLI today"
+/// signal, plus which subcommands actually ran and how often.
+///
+/// Counts accumulate on disk across invocations (each `aoe` run is a separate
+/// short-lived process, so there is no in-memory aggregation) and flush as one
+/// POST per day. `command_counts` keys are the closed clap subcommand set
+/// produced by [`crate::cli::command_name`]; they carry no args, flags, or
+/// paths, and every key is filtered against the allowlist before sending, so
+/// the event fits the closed-schema rule.
+#[derive(Debug, Clone, Serialize)]
+pub struct CliUsage {
+    pub schema: u32,
+    /// Always `"cli_usage"`.
+    pub event: &'static str,
+    pub install_id: String,
+    pub sent_at: String,
+    pub surface: Surface,
+    pub aoe_version: String,
+    pub os: String,
+    pub arch: String,
+
+    /// RFC 3339 UTC timestamp of the first command counted in this window. The
+    /// window length varies (a user may run `aoe` once, then again days later),
+    /// so this lets the aggregator compute honest per-day rates rather than
+    /// assuming a fixed 24h window.
+    pub window_start: String,
+    /// Allowlisted clap subcommand name -> invocation count since the last
+    /// confirmed flush (e.g. `{"add": 5, "list": 2}`).
+    pub command_counts: BTreeMap<String, u32>,
 }
 
 /// Emitted by long-running surfaces (TUI, `aoe serve`) on start, then every

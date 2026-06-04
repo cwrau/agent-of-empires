@@ -9,6 +9,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -39,17 +40,38 @@ static STATE_RMW_MUTEX: Mutex<()> = Mutex::new(());
 struct TelemetryState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     install_id: Option<String>,
-    /// Last time a CLI `process_start` was *confirmed delivered*, used to throttle
+    /// Last time a CLI `cli_usage` event was *confirmed delivered*, used to throttle
     /// the one unbounded event source to at most once per install per day. Long-lived
     /// surfaces (TUI / serve) emit once per launch and need no throttle. Only stamped
     /// on a successful send, so a failed send leaves the daily slot open for retry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_cli_process_start: Option<DateTime<Utc>>,
-    /// Last time a CLI `process_start` send was *attempted* (success or failure).
+    /// The `serde(alias)` reads the pre-#1879 field name so an in-place upgrade keeps
+    /// its throttle stamp instead of triggering an immediate flush on every install.
+    #[serde(
+        default,
+        alias = "last_cli_process_start",
+        skip_serializing_if = "Option::is_none"
+    )]
+    last_cli_usage_flush: Option<DateTime<Utc>>,
+    /// Last time a CLI `cli_usage` send was *attempted* (success or failure).
     /// Bounds retries: while the daily slot is open after a failed send, this stops
     /// every `aoe` invocation from re-attempting against a down endpoint.
+    #[serde(
+        default,
+        alias = "last_cli_process_start_attempt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    last_cli_usage_flush_attempt: Option<DateTime<Utc>>,
+    /// Per-subcommand invocation counts accumulated since the last confirmed
+    /// flush. CLI runs are short-lived separate processes, so the mix is
+    /// persisted here rather than aggregated in memory. Reset only on a
+    /// confirmed 2xx send. Keys are the closed clap command set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    cli_command_counts: BTreeMap<String, u32>,
+    /// When the current count window opened (first command counted since the
+    /// last confirmed flush). Lets the aggregator normalize variable-length
+    /// windows. Set when the first command lands, cleared on a confirmed flush.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_cli_process_start_attempt: Option<DateTime<Utc>>,
+    cli_usage_window_start: Option<DateTime<Utc>>,
 }
 
 fn state_path() -> Result<PathBuf> {
@@ -174,27 +196,6 @@ fn update_state_locked<R>(f: impl FnOnce(&mut TelemetryState) -> (R, bool)) -> R
     Ok(value)
 }
 
-/// Whether a CLI `process_start` send is due given an already-loaded `state`.
-/// Due when the last *confirmed* send is older than `success_gap` (or never)
-/// AND the last *attempt* is older than `retry_gap` (or never). Pure: the
-/// caller evaluates it under the lock in [`reserve_cli_process_start`] so the
-/// check and the claim are one transaction.
-fn due_in_state(
-    state: &TelemetryState,
-    now: DateTime<Utc>,
-    success_gap: Duration,
-    retry_gap: Duration,
-) -> bool {
-    // A stamp is "fresh" when its positive elapsed is still inside the gap. A
-    // negative elapsed (clock skew) counts as not fresh, so the send is allowed.
-    let fresh = |stamp: Option<DateTime<Utc>>, gap: Duration| match stamp {
-        Some(last) => matches!((now - last).to_std(), Ok(elapsed) if elapsed < gap),
-        None => false,
-    };
-    !fresh(state.last_cli_process_start, success_gap)
-        && !fresh(state.last_cli_process_start_attempt, retry_gap)
-}
-
 /// The current install id, if one has been generated. Read-only: never
 /// generates. Returns `None` when telemetry was never opted into.
 pub fn install_id() -> Option<String> {
@@ -252,55 +253,79 @@ pub fn reset_install_id() -> Option<String> {
     ensure_install_id()
 }
 
-/// Atomically reserve a CLI `process_start` send, returning the install id to
-/// send with when one is *due*, or `None` when not due, suppressed by
-/// `DO_NOT_TRACK`, or the lock is contended. Due when the last *confirmed* send
-/// is older than `success_gap` (or never) AND the last *attempt* older than
-/// `retry_gap` (or never). The whole check-and-claim runs under the lock: the
-/// attempt stamp is written and an install id ensured in the same transaction,
-/// so two concurrent `aoe` invocations can never both pass the gate and both
-/// send (the duplicate-send race in #1877). `success_gap` is the once-per-day
-/// throttle that bounds the only high-frequency source; `retry_gap` bounds how
-/// often a failed send is retried so a down endpoint can't turn every
-/// invocation into a fresh attempt. Caller owns the opt-in gate.
-pub fn reserve_cli_process_start(success_gap: Duration, retry_gap: Duration) -> Option<String> {
-    if super::do_not_track() {
-        return None;
+/// Increment the persisted count for one CLI subcommand and open the window if
+/// this is the first command since the last flush. Best-effort: a contended
+/// lock or save failure is logged at `debug` and dropped, since the counts are
+/// themselves a best-effort signal. The read-modify-write runs under the shared
+/// telemetry lock (#1877) so a concurrent TUI / serve writer can't clobber it.
+/// Caller is responsible for the opt-in gate.
+pub fn record_cli_command(name: &str) {
+    // Defense in depth: never persist a name outside the closed clap vocabulary,
+    // so a buggy caller cannot leave an arg or path in telemetry.json.
+    // build_cli_usage filtering only protects the wire, not the on-disk file.
+    if !crate::cli::CLI_COMMAND_NAMES.contains(&name) {
+        return;
     }
-    update_state_locked(|state| {
-        let now = Utc::now();
-        if !due_in_state(state, now, success_gap, retry_gap) {
-            return (None, false);
-        }
-        let id = match state.install_id.as_ref().filter(|s| !s.trim().is_empty()) {
-            Some(id) => id.clone(),
-            None => {
-                let id = uuid::Uuid::new_v4().to_string();
-                state.install_id = Some(id.clone());
-                id
-            }
-        };
-        state.last_cli_process_start_attempt = Some(now);
-        (Some(id), true)
-    })
-    .ok()
-    .flatten()
-}
-
-/// Confirm a reserved CLI `process_start` send was delivered, claiming the daily
-/// slot. A no-op (writing nothing, so the file is never recreated) when the
-/// install id no longer matches, i.e. an opt-out or `reset-id` landed during the
-/// in-flight send. The attempt stamp was already written by
-/// [`reserve_cli_process_start`]; this only stamps the confirmed-delivery slot.
-pub fn confirm_cli_process_start(install_id: &str) {
     let result = update_state_locked(|state| {
-        if state.install_id.as_deref() != Some(install_id) {
-            return ((), false);
+        *state
+            .cli_command_counts
+            .entry(name.to_string())
+            .or_insert(0) += 1;
+        if state.cli_usage_window_start.is_none() {
+            state.cli_usage_window_start = Some(Utc::now());
         }
-        state.last_cli_process_start = Some(Utc::now());
         ((), true)
     });
     if let Err(e) = result {
-        tracing::debug!(target: "telemetry", "failed to persist cli throttle stamp: {e}");
+        tracing::debug!(target: "telemetry", "failed to persist cli command count: {e}");
+    }
+}
+
+/// The accumulated command counts and the window-start stamp, for building a
+/// `cli_usage` event. Read-only.
+pub fn cli_usage_window() -> (BTreeMap<String, u32>, Option<DateTime<Utc>>) {
+    let state = load_state();
+    (state.cli_command_counts, state.cli_usage_window_start)
+}
+
+/// Whether a CLI `cli_usage` send is due. Due when the last *confirmed* send is
+/// older than `success_gap` (or never) AND the last *attempt* is older than
+/// `retry_gap` (or never). `success_gap` is the real once-per-day throttle that
+/// bounds the only unbounded telemetry source; `retry_gap` bounds how often a
+/// failed send is retried so a down endpoint can't turn every `aoe` invocation
+/// into a fresh attempt. Caller is responsible for the opt-in gate. Read-only:
+/// the stamps are written by [`record_cli_usage_flush`] after the send.
+pub fn cli_usage_due(success_gap: Duration, retry_gap: Duration) -> bool {
+    let state = load_state();
+    let now = Utc::now();
+    // A stamp is "fresh" when its positive elapsed is still inside the gap. A
+    // negative elapsed (clock skew) counts as not fresh, so the send is allowed.
+    let fresh = |stamp: Option<DateTime<Utc>>, gap: Duration| match stamp {
+        Some(last) => matches!((now - last).to_std(), Ok(elapsed) if elapsed < gap),
+        None => false,
+    };
+    !fresh(state.last_cli_usage_flush, success_gap)
+        && !fresh(state.last_cli_usage_flush_attempt, retry_gap)
+}
+
+/// Record a CLI `cli_usage` send. Always stamps the attempt (so `retry_gap`
+/// bounds retries). On a confirmed delivery it also stamps the daily slot and
+/// clears the accumulated counts + window, so the next window starts fresh; a
+/// failed send leaves the counts and the daily slot intact for the next
+/// invocation to retry, so a transient failure never drops a window. The
+/// read-modify-write runs under the shared telemetry lock (#1877).
+pub fn record_cli_usage_flush(success: bool) {
+    let result = update_state_locked(|state| {
+        let now = Utc::now();
+        state.last_cli_usage_flush_attempt = Some(now);
+        if success {
+            state.last_cli_usage_flush = Some(now);
+            state.cli_command_counts.clear();
+            state.cli_usage_window_start = None;
+        }
+        ((), true)
+    });
+    if let Err(e) = result {
+        tracing::debug!(target: "telemetry", "failed to persist cli usage flush state: {e}");
     }
 }
