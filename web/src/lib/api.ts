@@ -19,7 +19,10 @@ import {
 } from "./deviceBinding";
 
 // GET a JSON endpoint; returns null on non-2xx or network/parse errors.
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T | null> {
+async function fetchJson<T>(
+  url: string,
+  init?: RequestInit,
+): Promise<T | null> {
   try {
     const res = await fetch(url, init);
     if (!res.ok) return null;
@@ -40,7 +43,9 @@ export function fetchSessions(): Promise<SessionsEnvelope | null> {
   return fetchJson<SessionsEnvelope>("/api/sessions");
 }
 
-export async function updateWorkspaceOrdering(order: string[]): Promise<boolean> {
+export async function updateWorkspaceOrdering(
+  order: string[],
+): Promise<boolean> {
   try {
     const res = await fetch("/api/workspace-ordering", {
       method: "PUT",
@@ -140,7 +145,9 @@ export interface SettingsResponse {
   [key: string]: unknown;
 }
 
-export function fetchSettings(profile?: string): Promise<SettingsResponse | null> {
+export function fetchSettings(
+  profile?: string,
+): Promise<SettingsResponse | null> {
   const params = profile ? `?profile=${encodeURIComponent(profile)}` : "";
   return fetchJson<SettingsResponse>(`/api/settings${params}`);
 }
@@ -321,9 +328,7 @@ export async function fetchThemes(): Promise<string[]> {
 export function fetchResolvedTheme(
   name: string,
 ): Promise<ResolvedTheme | null> {
-  return fetchJson<ResolvedTheme>(
-    `/api/themes/${encodeURIComponent(name)}`,
-  );
+  return fetchJson<ResolvedTheme>(`/api/themes/${encodeURIComponent(name)}`);
 }
 
 /** Fetch the resolved theme for the active profile's current
@@ -634,7 +639,9 @@ export async function browseFilesystem(
   const params = new URLSearchParams({ path });
   if (limit != null) params.set("limit", String(limit));
   if (filter) params.set("filter", filter);
-  const data = await fetchJson<BrowseResponse>(`/api/filesystem/browse?${params}`);
+  const data = await fetchJson<BrowseResponse>(
+    `/api/filesystem/browse?${params}`,
+  );
   if (!data) return { entries: [], has_more: false, ok: false };
   return { ...data, ok: true };
 }
@@ -643,7 +650,9 @@ export async function fetchGroups(): Promise<GroupInfo[]> {
   return (await fetchJson<GroupInfo[]>("/api/groups")) ?? [];
 }
 
-export async function fetchProjects(scope?: "global" | "profile"): Promise<ProjectInfo[]> {
+export async function fetchProjects(
+  scope?: "global" | "profile",
+): Promise<ProjectInfo[]> {
   const url = scope ? `/api/projects?scope=${scope}` : "/api/projects";
   return (await fetchJson<ProjectInfo[]>(url)) ?? [];
 }
@@ -665,7 +674,10 @@ export async function createProject(body: {
       const text = await res.text();
       try {
         const data = JSON.parse(text);
-        return { ok: false, error: data.message || `Server error (${res.status})` };
+        return {
+          ok: false,
+          error: data.message || `Server error (${res.status})`,
+        };
       } catch {
         return { ok: false, error: text || `Server error (${res.status})` };
       }
@@ -690,7 +702,10 @@ export async function deleteProject(
       const text = await res.text();
       try {
         const data = JSON.parse(text);
-        return { ok: false, error: data.message || `Server error (${res.status})` };
+        return {
+          ok: false,
+          error: data.message || `Server error (${res.status})`,
+        };
       } catch {
         return { ok: false, error: text || `Server error (${res.status})` };
       }
@@ -720,7 +735,10 @@ export async function updateProject(
       const text = await res.text();
       try {
         const data = JSON.parse(text);
-        return { ok: false, error: data.message || `Server error (${res.status})` };
+        return {
+          ok: false,
+          error: data.message || `Server error (${res.status})`,
+        };
       } catch {
         return { ok: false, error: text || `Server error (${res.status})` };
       }
@@ -954,9 +972,8 @@ export async function logout(): Promise<void> {
     // same tab does not see the previous user's settings snapshot or
     // hear their cached blob.
     try {
-      const { clearApprovalSoundCache } = await import(
-        "../hooks/useApprovalSound"
-      );
+      const { clearApprovalSoundCache } =
+        await import("../hooks/useApprovalSound");
       clearApprovalSoundCache();
     } catch {
       // ignore
@@ -1040,8 +1057,7 @@ export async function setSessionNotifications(
   id: string,
   preset: "off" | "default" | "all",
 ): Promise<boolean> {
-  const value =
-    preset === "off" ? false : preset === "all" ? true : null;
+  const value = preset === "off" ? false : preset === "all" ? true : null;
   try {
     const res = await fetch(`/api/sessions/${id}/notifications`, {
       method: "PATCH",
@@ -1179,7 +1195,9 @@ export async function deleteSession(
         error: data.message || `Server error (${res.status})`,
       };
     }
-    const data = (await res.json().catch(() => ({}))) as { messages?: string[] };
+    const data = (await res.json().catch(() => ({}))) as {
+      messages?: string[];
+    };
     return { ok: true, messages: data.messages };
   } catch (e) {
     return {

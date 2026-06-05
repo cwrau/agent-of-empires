@@ -81,11 +81,14 @@ test("multi-device: a second authenticated UA appears as a distinct entry", asyn
   });
 
   await expect
-    .poll(async () => {
-      const r = await page.request.get(`${serveToken.baseUrl}/api/devices`);
-      if (!r.ok()) return 0;
-      return ((await r.json()) as unknown[]).length;
-    }, { timeout: 10_000 })
+    .poll(
+      async () => {
+        const r = await page.request.get(`${serveToken.baseUrl}/api/devices`);
+        if (!r.ok()) return 0;
+        return ((await r.json()) as unknown[]).length;
+      },
+      { timeout: 10_000 },
+    )
     .toBeGreaterThan(0);
 
   // Hit any token-gated endpoint with a distinct UA via Bearer auth.
