@@ -65,7 +65,45 @@ impl HomeView {
             let Some(existing) = existing else {
                 return;
             };
-            match projects::remove(&profile, existing.scope, &existing.path) {
+            // Unpin means "this repo is no longer pinned anywhere", so clear
+            // every registry entry for its canonical path rather than just the
+            // one `load_merged` happened to surface. A path can sit in more than
+            // one scope at once (`--allow-override` lets a profile entry shadow
+            // a global one); removing only the visible entry would re-surface
+            // the shadowed one and leave the header pinned after a "success"
+            // dialog. `registered_projects` also drops which profile each entry
+            // came from in all-profiles mode, and `config_profile()` is only
+            // the default, so sweep the global file plus every loaded profile.
+            let target = existing.path.clone();
+            let mut profiles: Vec<String> = self.storages.keys().cloned().collect();
+            if !profiles.contains(&profile) {
+                profiles.push(profile.clone());
+            }
+            // Global lives in one shared file, so the profile arg is irrelevant.
+            let mut removals = vec![projects::remove(&profile, ProjectScope::Global, &target)];
+            for p in &profiles {
+                removals.push(projects::remove(p, ProjectScope::Profile, &target));
+            }
+            let mut removed_any = false;
+            let mut hard_err: Option<projects::RegistryError> = None;
+            for res in removals {
+                match res {
+                    Ok(_) => removed_any = true,
+                    Err(projects::RegistryError::NotFound(_)) => {}
+                    Err(e) => hard_err = Some(e),
+                }
+            }
+            // Surface a real I/O/parse failure even if some entry was removed;
+            // a partial unpin the user can't see is worse than a visible error.
+            let result: Result<(), projects::RegistryError> = match (hard_err, removed_any) {
+                (Some(e), _) => Err(e),
+                (None, true) => Ok(()),
+                (None, false) => Err(projects::RegistryError::NotFound(format!(
+                    "No pinned project '{}' found in any loaded scope",
+                    label
+                ))),
+            };
+            match result {
                 Ok(_) => {
                     self.info_dialog = Some(InfoDialog::new(
                         "Project Unpinned",
