@@ -12,6 +12,7 @@ import {
   getSettingsSchema,
   setDefaultProfile,
   updateProfileSettings,
+  updateSettings,
   updateTheme,
 } from "../lib/api";
 import type { ProfileInfo, SettingsFieldDescriptor } from "../lib/types";
@@ -19,6 +20,7 @@ import { SchemaSection } from "./settings/SchemaSection";
 import { SelectField } from "./settings/FormFields";
 import { DiffSettings } from "./settings/DiffSettings";
 import { TelemetrySettings } from "./settings/TelemetrySettings";
+import { PluginsSettings } from "./settings/PluginsSettings";
 import { SettingsHeader } from "./settings/SettingsHeader";
 
 type TabId =
@@ -37,7 +39,8 @@ type TabId =
   | "devices"
   | "structured-view"
   | "mcp"
-  | "logging";
+  | "logging"
+  | "plugins";
 
 type SidebarItem = { kind: "tab"; id: TabId; label: string } | { kind: "divider"; label: string };
 
@@ -74,6 +77,7 @@ export function buildSidebar(): SidebarItem[] {
     { kind: "tab", id: "updates", label: "Updates" },
     { kind: "tab", id: "telemetry", label: "Telemetry" },
     { kind: "tab", id: "logging", label: "Logging" },
+    { kind: "tab", id: "plugins", label: "Plugins" },
   ];
 }
 
@@ -107,6 +111,7 @@ const ALL_TAB_IDS = new Set<TabId>([
   "structured-view",
   "mcp",
   "logging",
+  "plugins",
 ]);
 
 function isTabId(value: unknown): value is TabId {
@@ -301,6 +306,29 @@ export function SettingsView({ onClose, tab, onSelectTab, onServerAboutRefresh, 
     [settings, saveField],
   );
 
+  // Plugin settings (virtual `plugin:<id>` sections) are global-only: they
+  // write through the global PATCH (which expands the virtual section into
+  // `plugins.<id>.settings`), never a profile override (#268).
+  const savePluginField = useCallback(
+    async (section: string, field: string, value: unknown): Promise<boolean> => {
+      setSaving(true);
+      setSaveError(null);
+      const ok = await updateSettings({ [section]: { [field]: value } });
+      setSaving(false);
+      if (!ok) {
+        setSaveError("Failed to save plugin setting.");
+        return false;
+      }
+      const pluginId = section.slice("plugin:".length);
+      const pluginsMap = { ...((settings?.plugins ?? {}) as Record<string, { settings?: Record<string, unknown> }>) };
+      const entry = pluginsMap[pluginId] ?? {};
+      pluginsMap[pluginId] = { ...entry, settings: { ...(entry.settings ?? {}), [field]: value } };
+      updateLocal({ plugins: pluginsMap });
+      return true;
+    },
+    [settings, updateLocal],
+  );
+
   // The theme name and color mode are global preferences, not
   // profile-overridable: write them through the dedicated non-elevated
   // /api/theme endpoint instead of the profile settings PATCH. Writing the
@@ -474,6 +502,43 @@ export function SettingsView({ onClose, tab, onSelectTab, onServerAboutRefresh, 
             advancedSubtitle="Sink and rotation; some fields require restarting aoe to take effect."
           />
         );
+
+      case "plugins": {
+        // Management (list, enable/disable, install, update, uninstall)
+        // renders regardless of schema state; per-plugin settings ride the
+        // runtime schema's virtual plugin:<id> sections (#268) and are
+        // global-only, so they save through the global PATCH, never a
+        // profile override.
+        const pluginsMap = (settings?.plugins ?? {}) as Record<string, { settings?: Record<string, unknown> }>;
+        const pluginSections = [
+          ...new Set(schema.filter((d) => d.section.startsWith("plugin:")).map((d) => d.section)),
+        ];
+        return (
+          <div className="space-y-6">
+            <PluginsSettings />
+            {pluginSections.length > 0 && (
+              <div className="space-y-4">
+                <h4 className="text-xs font-mono uppercase tracking-widest text-text-muted">Plugin Settings</h4>
+                {schemaGuard() ??
+                  pluginSections.map((section) => {
+                    const pluginId = section.slice("plugin:".length);
+                    return (
+                      <div key={section} className="space-y-2">
+                        <p className="text-xs text-text-dim">{pluginId}</p>
+                        <SchemaSection
+                          section={section}
+                          schema={schema}
+                          values={pluginsMap[pluginId]?.settings ?? {}}
+                          onSaveField={savePluginField}
+                        />
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+        );
+      }
 
       case "notifications":
         return (

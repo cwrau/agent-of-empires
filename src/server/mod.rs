@@ -1436,6 +1436,15 @@ fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/settings/schema", get(api::get_settings_schema))
         .route("/api/settings/resolved", get(api::get_settings_resolved))
+        // Plugin management (#268). Mutations gate on read-only + elevation
+        // inside the handlers (install runs code on the host).
+        .route(
+            "/api/plugins",
+            get(api::list_plugins).post(api::install_plugin),
+        )
+        .route("/api/plugins/{id}", delete(api::uninstall_plugin))
+        .route("/api/plugins/{id}/enabled", post(api::set_plugin_enabled))
+        .route("/api/plugins/{id}/update", post(api::update_plugin))
         .route(
             "/api/app-state/web-tour-seen",
             post(api::mark_web_tour_seen),

@@ -2406,6 +2406,13 @@
       "risk": "high",
       "specs": ["tests/live/file-watch-peer-propagation.spec.ts"],
       "components": ["web/src/components/WorkspaceSidebar.tsx"]
+    },
+    {
+      "id": "settings.plugins",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": ["src/components/settings/__tests__/PluginsSettings.test.tsx"],
+      "components": ["web/src/components/settings/PluginsSettings.tsx"]
     }
   ]
 }

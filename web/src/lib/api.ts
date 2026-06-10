@@ -178,6 +178,129 @@ export function resetSettingsSchemaCache(): void {
   schemaPromise = null;
 }
 
+// --- Plugins (#268) ---
+
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  source: string;
+  trust: "builtin" | "community";
+  enabled: boolean;
+  grant: "granted" | "missing" | "stale";
+  active: boolean;
+  capabilities: string[];
+  has_runtime: boolean;
+  setting_count: number;
+  builtin: boolean;
+}
+
+export interface PluginListResponse {
+  plugins: PluginInfo[];
+  load_errors: string[];
+  isolation_summary: string;
+}
+
+/** The two-phase install/update prompt: declared capabilities the user must
+ *  approve before anything is written. */
+export interface PluginCapabilityPrompt {
+  needs_confirmation: true;
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  capabilities: string[];
+  previous_capabilities: string[] | null;
+  trust: "builtin" | "community";
+  source: string;
+  isolation_summary: string;
+}
+
+export type PluginMutationResult =
+  | { kind: "ok"; message: string }
+  | { kind: "prompt"; prompt: PluginCapabilityPrompt }
+  | { kind: "error"; message: string };
+
+export function fetchPlugins(): Promise<PluginListResponse | null> {
+  return fetchJson<PluginListResponse>("/api/plugins");
+}
+
+export async function setPluginEnabled(id: string, enabled: boolean): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/enabled`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function pluginMutation(url: string, body: Record<string, unknown>): Promise<PluginMutationResult> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    if (res.status === 409 && payload?.needs_confirmation) {
+      return { kind: "prompt", prompt: payload as unknown as PluginCapabilityPrompt };
+    }
+    if (!res.ok) {
+      const message = typeof payload?.message === "string" ? payload.message : `request failed (${res.status})`;
+      return { kind: "error", message };
+    }
+    const outcome = payload?.installed ?? payload?.updated ?? payload?.up_to_date;
+    const v = outcome as { id?: string; version?: string } | undefined;
+    const message = payload?.installed
+      ? `Installed ${v?.id} ${v?.version}`
+      : payload?.updated
+        ? `Updated ${v?.id} to ${v?.version}`
+        : payload?.up_to_date
+          ? `${v?.id} is already up to date (${v?.version})`
+          : "Done";
+    return { kind: "ok", message };
+  } catch {
+    return { kind: "error", message: "network error" };
+  }
+}
+
+export function installPlugin(source: string, confirmCapabilities: boolean): Promise<PluginMutationResult> {
+  return pluginMutation("/api/plugins", { source, confirm_capabilities: confirmCapabilities });
+}
+
+export function updatePlugin(id: string, confirmCapabilities: boolean): Promise<PluginMutationResult> {
+  return pluginMutation(`/api/plugins/${encodeURIComponent(id)}/update`, {
+    confirm_capabilities: confirmCapabilities,
+  });
+}
+
+export async function uninstallPlugin(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function updateSettings(updates: Record<string, unknown>): Promise<boolean> {
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Sets the global theme (name and/or color mode). Dedicated endpoint, not
  * `PATCH /api/settings`: the theme is a global preference but cosmetic, so it
