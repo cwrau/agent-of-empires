@@ -55,6 +55,12 @@ pub struct PluginManagerDialog {
     info: Option<String>,
 }
 
+impl Default for PluginManagerDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginManagerDialog {
     pub fn new() -> Self {
         let mut dialog = Self {

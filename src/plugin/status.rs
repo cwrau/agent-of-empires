@@ -107,7 +107,7 @@ fn compile_rules(rules: &[DetectionRule]) -> CompiledAgent {
             })
         })
         .collect();
-    compiled.sort_by(|a, b| b.priority.cmp(&a.priority));
+    compiled.sort_by_key(|r| std::cmp::Reverse(r.priority));
     CompiledAgent { rules: compiled }
 }
 
@@ -207,9 +207,12 @@ pub fn detect(session: Option<&str>, tool: &str, clean: &str) -> Option<Status> 
     None
 }
 
+/// One queued pane snapshot: (session_id, agent, pane_text tail).
+type PendingSnapshot = (String, String, String);
+
 struct Batcher {
     /// Per-plugin pending snapshots, flushed as one detect_batch call.
-    pending: Mutex<HashMap<String, Vec<(String, String, String)>>>,
+    pending: Mutex<HashMap<String, Vec<PendingSnapshot>>>,
     /// (plugin, session) -> last detected status.
     cache: Mutex<HashMap<(String, String), (Status, Instant)>>,
     last_flush: Mutex<HashMap<String, Instant>>,
@@ -279,7 +282,7 @@ fn flush(rpc: &RpcAgent, b: &Batcher) {
         }
         *stamp = Instant::now();
     }
-    let snapshots: Vec<(String, String, String)> = {
+    let snapshots: Vec<PendingSnapshot> = {
         let mut pending = b.pending.lock().expect("status pending lock");
         pending.remove(&rpc.plugin_id).unwrap_or_default()
     };

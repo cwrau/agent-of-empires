@@ -130,7 +130,7 @@ export function PluginsSettings() {
         {data?.plugins.map((plugin) => (
           <div
             key={plugin.id}
-            className="rounded border border-border bg-surface p-3"
+            className="rounded border border-surface-700 bg-surface-850 p-3"
             data-testid={`plugin-${plugin.id}`}
           >
             <div className="flex items-start justify-between gap-3">
@@ -162,7 +162,7 @@ export function PluginsSettings() {
                   <>
                     <button
                       type="button"
-                      className="rounded border border-border px-2 py-1 text-xs hover:bg-surface-raised"
+                      className="rounded border border-surface-700 px-2 py-1 text-xs hover:bg-surface-800"
                       disabled={busy}
                       onClick={() => void runMutation({ kind: "update", id: plugin.id }, false)}
                     >
@@ -195,7 +195,7 @@ export function PluginsSettings() {
         ))}
       </div>
 
-      <div className="rounded border border-border bg-surface p-3">
+      <div className="rounded border border-surface-700 bg-surface-850 p-3">
         <p className="mb-2 text-sm font-medium">Install a plugin</p>
         <p className="mb-2 text-xs text-text-dim">
           GitHub slug (owner/repo) or a directory path on the server host. Community plugins ask for their declared
@@ -207,13 +207,13 @@ export function PluginsSettings() {
             type="text"
             placeholder="owner/repo"
             aria-label="Plugin source"
-            className="min-w-0 flex-1 rounded border border-border bg-surface-raised px-2 py-1 text-sm"
+            className="min-w-0 flex-1 rounded border border-surface-700 bg-surface-900 px-2 py-1 text-sm"
             value={installSource}
             onChange={(e) => setInstallSource(e.target.value)}
           />
           <button
             type="button"
-            className="rounded bg-accent px-3 py-1 text-sm text-white disabled:opacity-50"
+            className="rounded bg-brand-600 px-3 py-1 text-sm text-white disabled:opacity-50"
             disabled={busy || installSource.trim() === ""}
             onClick={() => void runMutation({ kind: "install", source: installSource.trim() }, false)}
           >
@@ -247,7 +247,7 @@ export function PluginsSettings() {
           <div className="mt-3 flex gap-2">
             <button
               type="button"
-              className="rounded bg-accent px-3 py-1 text-sm text-white"
+              className="rounded bg-brand-600 px-3 py-1 text-sm text-white"
               disabled={busy}
               onClick={() => void runMutation(pendingAction, true)}
             >
@@ -255,7 +255,7 @@ export function PluginsSettings() {
             </button>
             <button
               type="button"
-              className="rounded border border-border px-3 py-1 text-sm"
+              className="rounded border border-surface-700 px-3 py-1 text-sm"
               disabled={busy}
               onClick={() => {
                 setPrompt(null);
