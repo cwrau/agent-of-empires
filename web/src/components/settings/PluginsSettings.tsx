@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  fetchPluginUpdates,
   fetchPlugins,
   installPlugin,
   setPluginEnabled,
@@ -9,6 +10,7 @@ import {
   type PluginCapabilityPrompt,
   type PluginInfo,
   type PluginListResponse,
+  type PluginUpdateStatus,
 } from "../../lib/api";
 
 /// Plugin management: list every known plugin with trust and grant state,
@@ -28,6 +30,9 @@ export function PluginsSettings() {
   const [pendingAction, setPendingAction] = useState<
     { kind: "install"; source: string } | { kind: "update"; id: string } | null
   >(null);
+  /// Filled by the explicit "Check for updates" button; checks do network
+  /// IO per GitHub plugin, so they never run on load.
+  const [updateStatuses, setUpdateStatuses] = useState<Record<string, PluginUpdateStatus> | null>(null);
 
   const reload = useCallback(async () => {
     const next = await fetchPlugins();
@@ -85,6 +90,28 @@ export function PluginsSettings() {
         setError(result.message);
         setPrompt(null);
         setPendingAction(null);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onCheckUpdates = async () => {
+    setBusy(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await fetchPluginUpdates();
+      if (result) {
+        setUpdateStatuses(result.updates);
+        const available = Object.values(result.updates).filter((s) => s.status === "available").length;
+        setNotice(
+          available === 0
+            ? "All community plugins are up to date."
+            : `${available} plugin${available === 1 ? "" : "s"} can be updated.`,
+        );
+      } else {
+        setError("Update check failed.");
       }
     } finally {
       setBusy(false);
@@ -150,6 +177,11 @@ export function PluginsSettings() {
                       {plugin.grant === "stale" ? "grant stale" : "not granted"}
                     </span>
                   )}
+                  {updateStatuses?.[plugin.id]?.status === "available" && (
+                    <span className="rounded bg-emerald-900/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
+                      update available
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1 text-xs text-text-dim">{plugin.description}</p>
                 <p className="mt-1 text-[11px] text-text-dim">
@@ -194,6 +226,17 @@ export function PluginsSettings() {
           </div>
         ))}
       </div>
+
+      {data && data.plugins.some((p) => !p.builtin) && (
+        <button
+          type="button"
+          className="rounded border border-surface-700 px-3 py-1 text-sm hover:bg-surface-800 disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void onCheckUpdates()}
+        >
+          Check for updates
+        </button>
+      )}
 
       <div className="rounded border border-surface-700 bg-surface-850 p-3">
         <p className="mb-2 text-sm font-medium">Install a plugin</p>

@@ -175,6 +175,47 @@ default = false
 
 #[test]
 #[serial]
+fn test_outdated_reports_path_source_drift() {
+    let h = TuiTestHarness::new("plugin_outdated");
+    let source = tempfile::tempdir().expect("plugin source dir");
+    std::fs::write(
+        source.path().join("aoe-plugin.toml"),
+        r#"
+id = "acme.outdated"
+name = "Outdated Fixture"
+version = "1.0.0"
+api_version = 1
+"#,
+    )
+    .unwrap();
+    let dir = source.path().to_str().unwrap();
+    let install = h.run_cli(&["plugin", "install", dir, "--yes"]);
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let fresh = h.run_cli(&["plugin", "outdated"]);
+    let stdout = String::from_utf8_lossy(&fresh.stdout);
+    assert!(
+        stdout.contains("acme.outdated") && stdout.contains("up to date"),
+        "fresh install must be up to date:\n{stdout}"
+    );
+
+    std::fs::write(source.path().join("new-file.txt"), "drift").unwrap();
+    let drifted = h.run_cli(&["plugin", "outdated"]);
+    let stdout = String::from_utf8_lossy(&drifted.stdout);
+    assert!(
+        stdout.contains("update available"),
+        "source drift must report an available update:\n{stdout}"
+    );
+
+    h.run_cli(&["plugin", "uninstall", "acme.outdated"]);
+}
+
+#[test]
+#[serial]
 fn test_builtin_worker_answers_status_batch() {
     let h = TuiTestHarness::new("plugin_worker_batch");
     let request = r#"{"jsonrpc":"2.0","id":1,"method":"status.detect_batch","params":{"snapshots":[{"session_id":"s1","agent":"codex","pane_text":"Working (esc to interrupt)"}]}}"#;

@@ -55,6 +55,8 @@ pub enum PluginCommands {
         /// Path to a directory containing aoe-plugin.toml
         path: String,
     },
+    /// Check installed plugins against their sources for available updates
+    Outdated,
 }
 
 pub fn run(command: PluginCommands) -> Result<()> {
@@ -67,7 +69,33 @@ pub fn run(command: PluginCommands) -> Result<()> {
         PluginCommands::Disable { id } => run_set_enabled(&id, false),
         PluginCommands::Update { id, yes } => run_update(&id, yes),
         PluginCommands::Hash { path } => run_hash(&path),
+        PluginCommands::Outdated => run_outdated(),
     }
+}
+
+fn run_outdated() -> Result<()> {
+    use crate::plugin::update_check::UpdateStatus;
+    let results = crate::plugin::update_check::check_all()?;
+    if results.is_empty() {
+        println!("No community plugins installed; builtins update with the aoe binary.");
+        return Ok(());
+    }
+    let mut available = 0usize;
+    for (id, status) in &results {
+        let label = match status {
+            UpdateStatus::UpToDate => "up to date".to_string(),
+            UpdateStatus::Available => {
+                available += 1;
+                "update available".to_string()
+            }
+            UpdateStatus::Unknown { reason } => format!("unknown ({reason})"),
+        };
+        println!("{id:<24} {label}");
+    }
+    if available > 0 {
+        println!("\nRun `aoe plugin update <id>` to update.");
+    }
+    Ok(())
 }
 
 fn run_hash(path: &str) -> Result<()> {

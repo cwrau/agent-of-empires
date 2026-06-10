@@ -8,13 +8,14 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, waitFor } from "@testing-library/react";
 
-import type { PluginListResponse, PluginMutationResult } from "../../../lib/api";
+import type { PluginListResponse, PluginMutationResult, PluginUpdateStatus } from "../../../lib/api";
 
 const fetchPlugins = vi.fn<[], Promise<PluginListResponse | null>>();
 const setPluginEnabled = vi.fn<[string, boolean], Promise<boolean>>();
 const installPlugin = vi.fn<[string, boolean], Promise<PluginMutationResult>>();
 const updatePlugin = vi.fn<[string, boolean], Promise<PluginMutationResult>>();
 const uninstallPlugin = vi.fn<[string], Promise<boolean>>();
+const fetchPluginUpdates = vi.fn<[], Promise<{ updates: Record<string, PluginUpdateStatus> } | null>>();
 
 vi.mock("../../../lib/api", () => ({
   fetchPlugins: () => fetchPlugins(),
@@ -22,6 +23,7 @@ vi.mock("../../../lib/api", () => ({
   installPlugin: (source: string, confirm: boolean) => installPlugin(source, confirm),
   updatePlugin: (id: string, confirm: boolean) => updatePlugin(id, confirm),
   uninstallPlugin: (id: string) => uninstallPlugin(id),
+  fetchPluginUpdates: () => fetchPluginUpdates(),
 }));
 
 // Imported after the mock is registered.
@@ -73,6 +75,7 @@ beforeEach(() => {
   installPlugin.mockReset();
   updatePlugin.mockReset();
   uninstallPlugin.mockReset();
+  fetchPluginUpdates.mockReset();
   fetchPlugins.mockResolvedValue(listResponse());
   setPluginEnabled.mockResolvedValue(true);
   uninstallPlugin.mockResolvedValue(true);
@@ -172,6 +175,20 @@ describe("PluginsSettings contract", () => {
     expect(confirmSpy).toHaveBeenCalled();
     expect(uninstallPlugin).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+
+  it("check for updates renders the available badge from the updates map", async () => {
+    fetchPluginUpdates.mockResolvedValue({
+      updates: { "example.plugin": { status: "available" } },
+    });
+    const { findByText, queryByText } = render(<PluginsSettings />);
+    expect(queryByText("update available")).toBeNull();
+    fireEvent.click(await findByText("Check for updates"));
+    await waitFor(() => {
+      expect(fetchPluginUpdates).toHaveBeenCalledTimes(1);
+    });
+    await findByText("update available");
+    await findByText("1 plugin can be updated.");
   });
 
   it("load errors are surfaced, not swallowed", async () => {

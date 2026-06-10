@@ -53,6 +53,9 @@ pub struct PluginManagerDialog {
     install_input: Input,
     error: Option<String>,
     info: Option<String>,
+    /// Filled by the explicit 'c' check; does network IO per GitHub plugin,
+    /// so never on open.
+    update_status: std::collections::HashMap<String, crate::plugin::update_check::UpdateStatus>,
 }
 
 impl Default for PluginManagerDialog {
@@ -71,6 +74,7 @@ impl PluginManagerDialog {
             install_input: Input::default(),
             error: None,
             info: None,
+            update_status: std::collections::HashMap::new(),
         };
         dialog.reload();
         dialog
@@ -202,6 +206,27 @@ impl PluginManagerDialog {
                 }
                 DialogResult::Continue
             }
+            KeyCode::Char('c') => {
+                // Blocks like install: one git ls-remote per GitHub plugin.
+                match crate::plugin::update_check::check_all() {
+                    Ok(statuses) => {
+                        let available = statuses
+                            .iter()
+                            .filter(|(_, s)| {
+                                *s == crate::plugin::update_check::UpdateStatus::Available
+                            })
+                            .count();
+                        self.update_status = statuses.into_iter().collect();
+                        self.info = Some(match available {
+                            0 => "All community plugins are up to date.".into(),
+                            n => format!("{n} plugin(s) can be updated; press u to update."),
+                        });
+                        self.error = None;
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+                DialogResult::Continue
+            }
             KeyCode::Char('x') | KeyCode::Delete => {
                 if let Some(row) = self.rows.get(self.selected) {
                     if row.builtin {
@@ -319,7 +344,7 @@ impl PluginManagerDialog {
                     TrustLevel::Builtin => "builtin",
                     TrustLevel::Community => "community",
                 };
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(
                         format!("{:<28}", format!("{} v{}", row.name, row.version)),
                         Style::default().fg(theme.text),
@@ -327,7 +352,16 @@ impl PluginManagerDialog {
                     Span::styled(format!("{trust:<10}"), Style::default().fg(theme.dimmed)),
                     Span::styled(format!("{:<12}", state.0), Style::default().fg(state.1)),
                     Span::styled(row.source.clone(), Style::default().fg(theme.dimmed)),
-                ]))
+                ];
+                if self.update_status.get(&row.id)
+                    == Some(&crate::plugin::update_check::UpdateStatus::Available)
+                {
+                    spans.push(Span::styled(
+                        "  update available",
+                        Style::default().fg(theme.accent),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
         let list = List::new(items)
@@ -362,7 +396,7 @@ impl PluginManagerDialog {
                 .style(Style::default().fg(color))
                 .wrap(Wrap { trim: true }),
             None => Paragraph::new(
-                "space/enter toggle · i install · u update · x uninstall · esc close",
+                "space/enter toggle · i install · u update · c check updates · x uninstall · esc close",
             )
             .style(Style::default().fg(theme.dimmed)),
         };

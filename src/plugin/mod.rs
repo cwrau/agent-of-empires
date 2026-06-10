@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod settings;
 pub mod status;
+pub mod update_check;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

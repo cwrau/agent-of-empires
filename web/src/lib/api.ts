@@ -227,6 +227,16 @@ export function fetchPlugins(): Promise<PluginListResponse | null> {
   return fetchJson<PluginListResponse>("/api/plugins");
 }
 
+/** Per-plugin result of `GET /api/plugins/updates`. */
+export type PluginUpdateStatus =
+  | { status: "up_to_date" }
+  | { status: "available" }
+  | { status: "unknown"; reason: string };
+
+export function fetchPluginUpdates(): Promise<{ updates: Record<string, PluginUpdateStatus> } | null> {
+  return fetchJson<{ updates: Record<string, PluginUpdateStatus> }>("/api/plugins/updates");
+}
+
 export async function setPluginEnabled(id: string, enabled: boolean): Promise<boolean> {
   try {
     const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/enabled`, {

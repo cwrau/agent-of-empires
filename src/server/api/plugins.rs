@@ -89,6 +89,24 @@ pub async fn list_plugins() -> Json<serde_json::Value> {
     }))
 }
 
+/// `GET /api/plugins/updates`: check every community plugin against its
+/// recorded source. Read-only but does network IO (git ls-remote per GitHub
+/// plugin), so it is on-demand rather than folded into the list endpoint.
+pub async fn check_plugin_updates() -> Response {
+    let result = tokio::task::spawn_blocking(plugin::update_check::check_all).await;
+    match result {
+        Ok(Ok(statuses)) => {
+            let updates: serde_json::Map<String, serde_json::Value> = statuses
+                .into_iter()
+                .map(|(id, status)| (id, serde_json::to_value(status).expect("serializable")))
+                .collect();
+            Json(json!({ "updates": updates })).into_response()
+        }
+        Ok(Err(e)) => error_response(StatusCode::BAD_REQUEST, "plugin_error", format!("{e:#}")),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SetEnabledBody {
     pub enabled: bool,

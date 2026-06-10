@@ -26,6 +26,11 @@ pub struct LockRecord {
     /// real hash, so the next update recomputes and backfills it.
     #[serde(default)]
     pub tree_hash: String,
+    /// HEAD commit of the clone a GitHub install came from; lets
+    /// `update_check` ask `git ls-remote` instead of re-cloning. None for
+    /// local-path installs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     pub installed_at: DateTime<Utc>,
 }
 
@@ -106,6 +111,7 @@ mod tests {
                 },
                 manifest_hash: "sha256:abc".into(),
                 tree_hash: "sha256:def".into(),
+                commit: Some("0123abcd".into()),
                 installed_at: Utc::now(),
             },
         )

@@ -95,6 +95,8 @@ struct Staged {
     manifest: PluginManifest,
     manifest_raw: String,
     tree_hash: String,
+    /// HEAD of the clone for GitHub sources; None for local paths.
+    commit: Option<String>,
 }
 
 fn stage(source: &PluginSource) -> Result<Staged> {
@@ -124,12 +126,28 @@ fn stage(source: &PluginSource) -> Result<Staged> {
         .with_context(|| format!("no aoe-plugin.toml at {}", root.display()))?;
     let manifest = PluginManifest::from_toml_str(&manifest_raw)?;
     let tree_hash = super::integrity::tree_hash(&root)?;
+    let commit = match source {
+        PluginSource::GitHub { .. } => {
+            let output = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .context("running git rev-parse")?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        }
+        _ => None,
+    };
     Ok(Staged {
         root,
         _tempdir: tempdir,
         manifest,
         manifest_raw,
         tree_hash,
+        commit,
     })
 }
 
@@ -196,6 +214,7 @@ pub fn install(
                 source,
                 manifest_hash: hash,
                 tree_hash: staged.tree_hash.clone(),
+                commit: staged.commit.clone(),
                 installed_at: Utc::now(),
             },
         )?;
@@ -298,6 +317,7 @@ pub fn update(
                 source: record.source.clone(),
                 manifest_hash: new_hash.clone(),
                 tree_hash: staged.tree_hash.clone(),
+                commit: staged.commit.clone(),
                 installed_at: Utc::now(),
             },
         )

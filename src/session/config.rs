@@ -1518,6 +1518,13 @@ pub struct UpdatesConfig {
     #[serde(default = "default_web_poll_interval_minutes")]
     #[setting(label = "Web Poll Interval (minutes)", widget = "number", min = 0)]
     pub web_poll_interval_minutes: u64,
+
+    /// Auto-update installed community plugins at startup. An update that
+    /// changes a plugin's declared capabilities is never applied silently;
+    /// it stays pending until you approve it with `aoe plugin update`.
+    #[serde(default)]
+    #[setting(label = "Auto-update Plugins", widget = "toggle")]
+    pub auto_update_plugins: bool,
 }
 
 impl Default for UpdatesConfig {
@@ -1527,6 +1534,7 @@ impl Default for UpdatesConfig {
             check_interval_hours: 24,
             notify_in_cli: true,
             web_poll_interval_minutes: 60,
+            auto_update_plugins: false,
         }
     }
 }

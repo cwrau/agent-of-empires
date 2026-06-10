@@ -50,6 +50,26 @@ controls what a plugin can ask aoe to do through its API. It is not an OS
 sandbox; a plugin's worker process runs with your user's permissions.
 OS-level isolation backends are planned and will tighten this over time.
 
+## Keeping plugins up to date
+
+```sh
+aoe plugin outdated         # check every community plugin against its source
+aoe plugin update <id>      # fetch and install; re-prompts if capabilities changed
+```
+
+The check is cheap: GitHub installs compare the recorded commit against
+`git ls-remote` (no clone), local-path installs re-hash the source
+directory. The TUI plugin manager checks with `c`, and the web Plugins tab
+has a "Check for updates" button; both mark plugins with an available
+update.
+
+Set "Auto-update Plugins" in Settings (Updates section, `updates.
+auto_update_plugins` in config.toml, off by default) to update community
+plugins automatically at startup. Auto-update is deliberately conservative:
+an update that changes a plugin's declared capability set is NEVER applied
+silently; it stays pending until you run `aoe plugin update <id>` and
+approve the new set yourself.
+
 ## Featured plugins
 
 Featured plugins are community plugins the AoE maintainers vouch for at

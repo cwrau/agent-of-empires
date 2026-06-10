@@ -37,7 +37,8 @@ pub use git::{clone_repo, list_branches};
 pub use log_level::{get_log_level, patch_log_level};
 pub use mcp::{drop_mcp_server, get_mcp_servers, keep_mcp_server, resolve_mcp_conflict};
 pub use plugins::{
-    install_plugin, list_plugins, set_plugin_enabled, uninstall_plugin, update_plugin,
+    check_plugin_updates, install_plugin, list_plugins, set_plugin_enabled, uninstall_plugin,
+    update_plugin,
 };
 pub use projects::{create_project, delete_project, list_projects, update_project};
 pub use sessions::{

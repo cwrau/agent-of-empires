@@ -572,6 +572,13 @@ impl App {
             self.spawn_image_update_check();
         }
 
+        // Opt-in plugin auto-update, fire and forget: results land in the
+        // log, updated plugins take effect like any other registry reload.
+        // Capability-changing updates auto-decline inside the sweep.
+        if settings.auto_update_plugins {
+            tokio::task::spawn_blocking(crate::plugin::update_check::auto_update_and_log);
+        }
+
         // SIGHUP/SIGTERM futures so we exit cleanly when the terminal
         // emulator is force-quit, preventing PTY slot leaks (#541).
         // These are polled directly inside tokio::select!, which guarantees
