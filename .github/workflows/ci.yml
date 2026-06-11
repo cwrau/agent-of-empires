@@ -165,7 +165,7 @@ jobs:
           for system in $SYSTEMS; do
             echo ""
             echo "--- $system ---"
-            for pkg in default aoe-with-web; do
+            for pkg in default aoe-tui aoe-with-web; do
               printf "  %s: " "$pkg"
               if output=$(nix eval ".#packages.$system.$pkg.drvPath" --raw 2>&1); then
                 echo "✓"

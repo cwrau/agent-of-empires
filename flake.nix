@@ -34,8 +34,9 @@
             inherit nativeBuildInputs buildInputs;
             # Default cargo features now include `serve` (web dashboard),
             # whose build.rs step wants npm or AOE_WEB_DIST. The base
-            # package and checks stay TUI-only so they build hermetically
-            # without the frontend; aoe-with-web opts back in below.
+            # derivation and checks build TUI-only so they stay hermetic
+            # without the frontend; the web-enabled build (the flake's
+            # default package) opts back in below via AOE_WEB_DIST.
             cargoExtraArgs = "--no-default-features";
           };
 
@@ -118,7 +119,12 @@
           });
         in
         {
-          packages.default = aoe;
+          # The default package matches the cargo default: web dashboard
+          # included (frontend injected hermetically via AOE_WEB_DIST).
+          packages.default = aoeWithWeb;
+          # TUI-only binary, no web assets, smaller closure.
+          packages.aoe-tui = aoe;
+          # Back-compat alias; same derivation as the default package.
           packages.aoe-with-web = aoeWithWeb;
           # Just the npm + vite build. Exposed so the PR-CI Nix Build
           # Web job can validate npmDepsHash + frontend build in ~1-2

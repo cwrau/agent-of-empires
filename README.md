@@ -79,7 +79,7 @@ curl -fsSL \
 # Homebrew
 brew install aoe
 
-# Nix
+# Nix (web dashboard included; append #aoe-tui for a TUI-only binary)
 nix run github:agent-of-empires/agent-of-empires
 
 # Build from source
