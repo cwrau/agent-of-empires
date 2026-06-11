@@ -38,6 +38,11 @@ pub struct InstallPrompt {
     /// Whether the staged tree matches the curated featured index (a hash
     /// mismatch never reaches the prompt; it fails the install outright).
     pub featured: FeaturedValidation,
+    /// Hash of the exact staged manifest this prompt describes. Two-phase
+    /// surfaces (the web 409 flow) echo it back on confirm so approval
+    /// binds to what the user reviewed, not whatever the source serves on
+    /// the second fetch.
+    pub manifest_hash: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -204,6 +209,7 @@ pub fn install(
     }
 
     let featured = featured_validation(&source, &staged)?;
+    let staged_hash = manifest_hash(staged.manifest_raw.as_bytes());
     let prompt = InstallPrompt {
         id: id.clone(),
         name: staged.manifest.name.clone(),
@@ -214,6 +220,7 @@ pub fn install(
         source: source.clone(),
         previous_capabilities: None,
         featured,
+        manifest_hash: staged_hash.clone(),
     };
     if !confirm(&prompt) {
         return Ok(InstallOutcome::Declined);
@@ -227,7 +234,7 @@ pub fn install(
     // write fails, remove the tree so a half-installed plugin never lingers
     // behind missing grant/lockfile/config state.
     let metadata = (|| -> Result<()> {
-        let hash = manifest_hash(staged.manifest_raw.as_bytes());
+        let hash = staged_hash;
         GrantStore::load()?.grant(&id, hash.clone(), staged.manifest.capabilities.clone())?;
         Lockfile::load()?.upsert(
             &id,
@@ -308,6 +315,7 @@ pub fn update(
             source: record.source.clone(),
             previous_capabilities: Some(granted_caps),
             featured,
+            manifest_hash: new_hash.clone(),
         };
         if !confirm(&prompt) {
             return Ok(InstallOutcome::Declined);

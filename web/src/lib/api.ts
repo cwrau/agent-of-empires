@@ -215,6 +215,9 @@ export interface PluginCapabilityPrompt {
   trust: "builtin" | "community";
   source: string;
   featured: "not_featured" | "verified" | "unknown_version";
+  /** Hash of the staged manifest this prompt describes; echoed back on
+   *  confirm so approval binds to what the user reviewed. */
+  manifest_hash: string;
   isolation_summary: string;
 }
 
@@ -349,13 +352,26 @@ async function pluginMutation(url: string, body: Record<string, unknown>): Promi
   }
 }
 
-export function installPlugin(source: string, confirmCapabilities: boolean): Promise<PluginMutationResult> {
-  return pluginMutation("/api/plugins", { source, confirm_capabilities: confirmCapabilities });
+export function installPlugin(
+  source: string,
+  confirmCapabilities: boolean,
+  expectedManifestHash?: string,
+): Promise<PluginMutationResult> {
+  return pluginMutation("/api/plugins", {
+    source,
+    confirm_capabilities: confirmCapabilities,
+    expected_manifest_hash: expectedManifestHash ?? null,
+  });
 }
 
-export function updatePlugin(id: string, confirmCapabilities: boolean): Promise<PluginMutationResult> {
+export function updatePlugin(
+  id: string,
+  confirmCapabilities: boolean,
+  expectedManifestHash?: string,
+): Promise<PluginMutationResult> {
   return pluginMutation(`/api/plugins/${encodeURIComponent(id)}/update`, {
     confirm_capabilities: confirmCapabilities,
+    expected_manifest_hash: expectedManifestHash ?? null,
   });
 }
 

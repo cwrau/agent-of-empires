@@ -12,8 +12,8 @@ import type { DiscoveredPlugin, PluginListResponse, PluginMutationResult, Plugin
 
 const fetchPlugins = vi.fn<[], Promise<PluginListResponse | null>>();
 const setPluginEnabled = vi.fn<[string, boolean], Promise<boolean>>();
-const installPlugin = vi.fn<[string, boolean], Promise<PluginMutationResult>>();
-const updatePlugin = vi.fn<[string, boolean], Promise<PluginMutationResult>>();
+const installPlugin = vi.fn<[string, boolean, string | undefined], Promise<PluginMutationResult>>();
+const updatePlugin = vi.fn<[string, boolean, string | undefined], Promise<PluginMutationResult>>();
 const uninstallPlugin = vi.fn<[string], Promise<boolean>>();
 const fetchPluginUpdates = vi.fn<[], Promise<{ updates: Record<string, PluginUpdateStatus> } | null>>();
 const discoverPlugins = vi.fn<[], Promise<{ plugins: DiscoveredPlugin[] } | null>>();
@@ -21,8 +21,8 @@ const discoverPlugins = vi.fn<[], Promise<{ plugins: DiscoveredPlugin[] } | null
 vi.mock("../../../lib/api", () => ({
   fetchPlugins: () => fetchPlugins(),
   setPluginEnabled: (id: string, enabled: boolean) => setPluginEnabled(id, enabled),
-  installPlugin: (source: string, confirm: boolean) => installPlugin(source, confirm),
-  updatePlugin: (id: string, confirm: boolean) => updatePlugin(id, confirm),
+  installPlugin: (source: string, confirm: boolean, hash?: string) => installPlugin(source, confirm, hash),
+  updatePlugin: (id: string, confirm: boolean, hash?: string) => updatePlugin(id, confirm, hash),
   uninstallPlugin: (id: string) => uninstallPlugin(id),
   fetchPluginUpdates: () => fetchPluginUpdates(),
   discoverPlugins: () => discoverPlugins(),
@@ -108,6 +108,7 @@ describe("PluginsSettings contract", () => {
         trust: "community",
         source: "github:o/r",
         featured: "verified",
+        manifest_hash: "sha256:staged",
         isolation_summary: "runs as a regular process",
       },
     });
@@ -120,7 +121,7 @@ describe("PluginsSettings contract", () => {
 
     // Phase 1: unconfirmed request, prompt rendered, nothing written.
     await waitFor(() => {
-      expect(installPlugin).toHaveBeenCalledWith("o/r", false);
+      expect(installPlugin).toHaveBeenCalledWith("o/r", false, undefined);
     });
     const dialog = await findByRole("dialog");
     expect(dialog.textContent).toContain("net-fetch");
@@ -131,7 +132,7 @@ describe("PluginsSettings contract", () => {
     // Phase 2: approval re-sends with confirm_capabilities: true.
     fireEvent.click(await findByText("Approve and continue"));
     await waitFor(() => {
-      expect(installPlugin).toHaveBeenCalledWith("o/r", true);
+      expect(installPlugin).toHaveBeenCalledWith("o/r", true, "sha256:staged");
     });
     await findByText("Installed new.plugin 1.0.0");
   });
@@ -150,6 +151,7 @@ describe("PluginsSettings contract", () => {
         trust: "community",
         source: "github:o/r",
         featured: "not_featured",
+        manifest_hash: "sha256:other",
         isolation_summary: "runs as a regular process",
       },
     });
@@ -171,7 +173,7 @@ describe("PluginsSettings contract", () => {
 
     fireEvent.click(await findByText("Update"));
     await waitFor(() => {
-      expect(updatePlugin).toHaveBeenCalledWith("example.plugin", false);
+      expect(updatePlugin).toHaveBeenCalledWith("example.plugin", false, undefined);
     });
 
     fireEvent.click(await findByText("Uninstall"));
@@ -229,7 +231,7 @@ describe("PluginsSettings contract", () => {
     expect(installButton).not.toBeNull();
     fireEvent.click(installButton!);
     await waitFor(() => {
-      expect(installPlugin).toHaveBeenCalledWith("acme/aoe-review", false);
+      expect(installPlugin).toHaveBeenCalledWith("acme/aoe-review", false, undefined);
     });
   });
 

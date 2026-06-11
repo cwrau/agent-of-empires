@@ -78,10 +78,14 @@ export function PluginsSettings() {
     setNotice(null);
     setError(null);
     try {
+      // Approval binds to the manifest hash from the prompt the user saw;
+      // if the source changed since, the server answers with a fresh 409
+      // prompt instead of installing something unreviewed.
+      const expectedHash = confirmed ? prompt?.manifest_hash : undefined;
       const result =
         action.kind === "install"
-          ? await installPlugin(action.source, confirmed)
-          : await updatePlugin(action.id, confirmed);
+          ? await installPlugin(action.source, confirmed, expectedHash)
+          : await updatePlugin(action.id, confirmed, expectedHash);
       if (result.kind === "prompt") {
         setPrompt(result.prompt);
         setPendingAction(action);

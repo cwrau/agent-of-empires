@@ -160,6 +160,12 @@ pub struct InstallBody {
     /// False (or absent) returns the capability prompt instead of installing.
     #[serde(default)]
     pub confirm_capabilities: bool,
+    /// Hash of the manifest the user approved, from the 409 prompt payload.
+    /// Confirmation only proceeds when the re-staged source still serves
+    /// this exact manifest; anything else re-prompts (the source changed
+    /// between review and confirm).
+    #[serde(default)]
+    pub expected_manifest_hash: Option<String>,
 }
 
 fn prompt_json(prompt: &InstallPrompt) -> serde_json::Value {
@@ -174,6 +180,7 @@ fn prompt_json(prompt: &InstallPrompt) -> serde_json::Value {
         "trust": prompt.trust,
         "source": prompt.source.describe(),
         "featured": prompt.featured,
+        "manifest_hash": prompt.manifest_hash,
         "isolation_summary": plugin::sandbox::backend().isolation_summary(),
     })
 }
@@ -215,8 +222,12 @@ pub async fn install_plugin(
         let source = plugin::install::parse_source(&body.source)?;
         let mut prompt_payload = None;
         let confirm = body.confirm_capabilities;
+        let expected = body.expected_manifest_hash;
         let outcome = plugin::install::install(source, &mut |prompt| {
-            if confirm {
+            // The confirm pass re-stages the source, so approval must bind
+            // to the manifest the user actually reviewed: anything else
+            // (source moved between review and confirm) re-prompts.
+            if confirm && expected.as_deref() == Some(prompt.manifest_hash.as_str()) {
                 true
             } else {
                 prompt_payload = Some(prompt_json(prompt));
@@ -237,6 +248,9 @@ pub async fn install_plugin(
 pub struct UpdateBody {
     #[serde(default)]
     pub confirm_capabilities: bool,
+    /// See `InstallBody::expected_manifest_hash`.
+    #[serde(default)]
+    pub expected_manifest_hash: Option<String>,
 }
 
 /// `POST /api/plugins/{id}/update`
@@ -252,8 +266,9 @@ pub async fn update_plugin(
     let result = tokio::task::spawn_blocking(move || {
         let mut prompt_payload = None;
         let confirm = body.confirm_capabilities;
+        let expected = body.expected_manifest_hash;
         let outcome = plugin::install::update(&id, &mut |prompt| {
-            if confirm {
+            if confirm && expected.as_deref() == Some(prompt.manifest_hash.as_str()) {
                 true
             } else {
                 prompt_payload = Some(prompt_json(prompt));
