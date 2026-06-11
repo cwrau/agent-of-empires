@@ -58,6 +58,27 @@ pub enum InstallOutcome {
     Declined,
 }
 
+/// Cross-process plugin mutation lock (`<app_dir>/plugin.lock`). Install,
+/// update, uninstall, and enable/disable each run load-modify-save cycles
+/// over three whole-file stores (grants, lockfile, config); two concurrent
+/// mutations starting from the same snapshots would drop each other's
+/// writes (reachable from the dashboard, where every REST mutation runs in
+/// its own blocking task). Held for the WRITE phase only, never across an
+/// interactive capability prompt; released on drop.
+fn mutation_lock() -> Result<std::fs::File> {
+    use fs2::FileExt;
+    let path = crate::session::get_app_dir()?.join("plugin.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.lock_exclusive()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
+}
+
 /// Parse a user-supplied source string: an existing directory wins, then
 /// `owner/repo`.
 pub fn parse_source(input: &str) -> Result<PluginSource> {
@@ -198,6 +219,7 @@ pub fn install(
         return Ok(InstallOutcome::Declined);
     }
 
+    let _lock = mutation_lock()?;
     let dest = super::plugins_dir()?.join(&id);
     copy_plugin_tree(&staged.root, &dest)?;
 
@@ -292,6 +314,7 @@ pub fn update(
         }
     }
 
+    let _lock = mutation_lock()?;
     let dest = super::plugins_dir()?.join(plugin_id);
     let backup = dest.with_extension("updating");
     if backup.exists() {
@@ -360,6 +383,7 @@ pub fn uninstall(plugin_id: &str) -> Result<()> {
         (_, Some(root)) => root.clone(),
         (_, None) => bail!("{plugin_id} has no install directory on record"),
     };
+    let _lock = mutation_lock()?;
     std::fs::remove_dir_all(&root).with_context(|| format!("removing {}", root.display()))?;
     Lockfile::load()?.remove(plugin_id)?;
     GrantStore::load()?.revoke(plugin_id)?;
@@ -377,6 +401,7 @@ pub fn set_enabled(plugin_id: &str, enabled: bool) -> Result<()> {
     if registry.get(plugin_id).is_none() {
         bail!("unknown plugin {plugin_id:?}; see `aoe plugin list`");
     }
+    let _lock = mutation_lock()?;
     enable_in_config(plugin_id, enabled)?;
     super::reload_registry();
     Ok(())
