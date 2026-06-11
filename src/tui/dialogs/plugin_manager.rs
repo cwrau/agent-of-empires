@@ -21,6 +21,8 @@ enum Mode {
     Browse,
     /// Typing an install source (`owner/repo` or a local path).
     InstallInput,
+    /// GitHub topic-search results; fetched only on the explicit 'd' press.
+    Discover,
     /// Showing a captured capability prompt awaiting approval.
     ConfirmCaps {
         action: PendingAction,
@@ -56,6 +58,9 @@ pub struct PluginManagerDialog {
     /// Filled by the explicit 'c' check; does network IO per GitHub plugin,
     /// so never on open.
     update_status: std::collections::HashMap<String, crate::plugin::update_check::UpdateStatus>,
+    /// Filled by the explicit 'd' discover search; never fetched on open.
+    discovered: Vec<crate::plugin::discover::DiscoveredPlugin>,
+    discover_selected: usize,
 }
 
 impl Default for PluginManagerDialog {
@@ -75,6 +80,8 @@ impl PluginManagerDialog {
             error: None,
             info: None,
             update_status: std::collections::HashMap::new(),
+            discovered: Vec::new(),
+            discover_selected: 0,
         };
         dialog.reload();
         dialog
@@ -154,6 +161,7 @@ impl PluginManagerDialog {
         match &self.mode {
             Mode::Browse => self.handle_browse_key(key),
             Mode::InstallInput => self.handle_install_input_key(key),
+            Mode::Discover => self.handle_discover_key(key),
             Mode::ConfirmCaps { .. } => self.handle_confirm_key(key),
         }
     }
@@ -245,6 +253,56 @@ impl PluginManagerDialog {
                 }
                 DialogResult::Continue
             }
+            KeyCode::Char('d') => {
+                // Blocks like 'c': one GitHub search request, explicit
+                // user action only; discovery never runs on open.
+                match crate::plugin::discover::discover_blocking() {
+                    Ok(found) => {
+                        self.info = Some(format!("{} plugin repositories found.", found.len()));
+                        self.discovered = found;
+                        self.discover_selected = 0;
+                        self.error = None;
+                        self.mode = Mode::Discover;
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+                DialogResult::Continue
+            }
+            _ => DialogResult::Continue,
+        }
+    }
+
+    fn handle_discover_key(&mut self, key: KeyEvent) -> DialogResult<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Browse;
+                DialogResult::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !self.discovered.is_empty() {
+                    self.discover_selected =
+                        (self.discover_selected + 1).min(self.discovered.len() - 1);
+                }
+                DialogResult::Continue
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.discover_selected = self.discover_selected.saturating_sub(1);
+                DialogResult::Continue
+            }
+            KeyCode::Enter | KeyCode::Char('i') => {
+                if let Some(plugin) = self.discovered.get(self.discover_selected) {
+                    if plugin.installed {
+                        self.info = Some(format!("{} is already installed.", plugin.slug));
+                    } else {
+                        // Same two-phase flow as a typed install: the
+                        // capability prompt still gates anything unvetted.
+                        let action = PendingAction::Install(plugin.slug.clone());
+                        self.error = None;
+                        self.run_pending(action, false);
+                    }
+                }
+                DialogResult::Continue
+            }
             _ => DialogResult::Continue,
         }
     }
@@ -302,6 +360,7 @@ impl PluginManagerDialog {
         let title = match self.mode {
             Mode::Browse => " Plugins ",
             Mode::InstallInput => " Install plugin ",
+            Mode::Discover => " Discover plugins ",
             Mode::ConfirmCaps { .. } => " Approve capabilities ",
         };
         let block = Block::default()
@@ -315,6 +374,7 @@ impl PluginManagerDialog {
         match &self.mode {
             Mode::Browse => self.render_browse(f, inner, theme),
             Mode::InstallInput => self.render_install_input(f, inner, theme),
+            Mode::Discover => self.render_discover(f, inner, theme),
             Mode::ConfirmCaps { summary, .. } => self.render_confirm(f, inner, theme, summary),
         }
     }
@@ -396,11 +456,79 @@ impl PluginManagerDialog {
                 .style(Style::default().fg(color))
                 .wrap(Wrap { trim: true }),
             None => Paragraph::new(
-                "space/enter toggle · i install · u update · c check updates · x uninstall · esc close",
+                "space/enter toggle · i install · d discover · u update · c check updates · x uninstall · esc close",
             )
             .style(Style::default().fg(theme.dimmed)),
         };
         f.render_widget(footer, chunks[2]);
+    }
+
+    fn render_discover(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(2)])
+            .split(area);
+
+        let items: Vec<ListItem> = self
+            .discovered
+            .iter()
+            .map(|plugin| {
+                let (badge, color) = if plugin.installed {
+                    ("installed", theme.dimmed)
+                } else if plugin.featured {
+                    ("featured", theme.running)
+                } else {
+                    ("unvetted", theme.error)
+                };
+                let spans = vec![
+                    Span::styled(
+                        format!("{:<32}", plugin.slug),
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled(format!("{badge:<11}"), Style::default().fg(color)),
+                    Span::styled(
+                        format!("{:>5}* ", plugin.stars),
+                        Style::default().fg(theme.dimmed),
+                    ),
+                    Span::styled(
+                        plugin.description.clone().unwrap_or_default(),
+                        Style::default().fg(theme.dimmed),
+                    ),
+                ];
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        let list = List::new(items)
+            .highlight_style(
+                Style::default()
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+        let mut state = ListState::default();
+        state.select(if self.discovered.is_empty() {
+            None
+        } else {
+            Some(self.discover_selected)
+        });
+        f.render_stateful_widget(list, chunks[0], &mut state);
+
+        let status = self
+            .error
+            .as_deref()
+            .map(|e| (e, theme.error))
+            .or(self.info.as_deref().map(|i| (i, theme.running)));
+        let footer = match status {
+            Some((message, color)) => Paragraph::new(message.to_string())
+                .style(Style::default().fg(color))
+                .wrap(Wrap { trim: true }),
+            None => Paragraph::new(
+                "Plugins not marked featured are unvetted community code. \
+                 enter/i install · j/k move · esc back",
+            )
+            .style(Style::default().fg(theme.dimmed)),
+        };
+        f.render_widget(footer, chunks[1]);
     }
 
     fn render_install_input(&self, f: &mut Frame, area: Rect, theme: &Theme) {

@@ -57,6 +57,8 @@ pub enum PluginCommands {
     },
     /// Check installed plugins against their sources for available updates
     Outdated,
+    /// Search GitHub for community plugins (repositories tagged `aoe-plugin`)
+    Discover,
 }
 
 pub fn run(command: PluginCommands) -> Result<()> {
@@ -70,7 +72,39 @@ pub fn run(command: PluginCommands) -> Result<()> {
         PluginCommands::Update { id, yes } => run_update(&id, yes),
         PluginCommands::Hash { path } => run_hash(&path),
         PluginCommands::Outdated => run_outdated(),
+        PluginCommands::Discover => run_discover(),
     }
+}
+
+fn run_discover() -> Result<()> {
+    println!(
+        "Searching GitHub for repositories tagged `{}`...",
+        crate::plugin::discover::PLUGIN_TOPIC
+    );
+    let found = crate::plugin::discover::discover_blocking()?;
+    if found.is_empty() {
+        println!("No plugin repositories found.");
+        return Ok(());
+    }
+    for plugin in &found {
+        let badge = if plugin.installed {
+            "installed"
+        } else if plugin.featured {
+            "featured"
+        } else {
+            "unvetted"
+        };
+        let description = plugin.description.as_deref().unwrap_or("");
+        println!(
+            "{:<32} {:<10} {:>6}★  {}",
+            plugin.slug, badge, plugin.stars, description
+        );
+    }
+    println!(
+        "\nInstall with `aoe plugin install <owner/repo>`. Plugins not marked `featured` \
+         are unvetted community code; review them before granting capabilities."
+    );
+    Ok(())
 }
 
 fn run_outdated() -> Result<()> {

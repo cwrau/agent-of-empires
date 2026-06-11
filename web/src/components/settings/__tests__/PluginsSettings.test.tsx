@@ -8,7 +8,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, waitFor } from "@testing-library/react";
 
-import type { PluginListResponse, PluginMutationResult, PluginUpdateStatus } from "../../../lib/api";
+import type { DiscoveredPlugin, PluginListResponse, PluginMutationResult, PluginUpdateStatus } from "../../../lib/api";
 
 const fetchPlugins = vi.fn<[], Promise<PluginListResponse | null>>();
 const setPluginEnabled = vi.fn<[string, boolean], Promise<boolean>>();
@@ -16,6 +16,7 @@ const installPlugin = vi.fn<[string, boolean], Promise<PluginMutationResult>>();
 const updatePlugin = vi.fn<[string, boolean], Promise<PluginMutationResult>>();
 const uninstallPlugin = vi.fn<[string], Promise<boolean>>();
 const fetchPluginUpdates = vi.fn<[], Promise<{ updates: Record<string, PluginUpdateStatus> } | null>>();
+const discoverPlugins = vi.fn<[], Promise<{ plugins: DiscoveredPlugin[] } | null>>();
 
 vi.mock("../../../lib/api", () => ({
   fetchPlugins: () => fetchPlugins(),
@@ -24,6 +25,7 @@ vi.mock("../../../lib/api", () => ({
   updatePlugin: (id: string, confirm: boolean) => updatePlugin(id, confirm),
   uninstallPlugin: (id: string) => uninstallPlugin(id),
   fetchPluginUpdates: () => fetchPluginUpdates(),
+  discoverPlugins: () => discoverPlugins(),
 }));
 
 // Imported after the mock is registered.
@@ -76,6 +78,7 @@ beforeEach(() => {
   updatePlugin.mockReset();
   uninstallPlugin.mockReset();
   fetchPluginUpdates.mockReset();
+  discoverPlugins.mockReset();
   fetchPlugins.mockResolvedValue(listResponse());
   setPluginEnabled.mockResolvedValue(true);
   uninstallPlugin.mockResolvedValue(true);
@@ -189,6 +192,45 @@ describe("PluginsSettings contract", () => {
     });
     await findByText("update available");
     await findByText("1 plugin can be updated.");
+  });
+
+  it("discover runs only on click, badges results, and installs through the two-phase flow", async () => {
+    discoverPlugins.mockResolvedValue({
+      plugins: [
+        { slug: "acme/aoe-review", description: "Curated review plugin", stars: 42, featured: true, installed: false },
+        { slug: "rando/aoe-thing", description: null, stars: 3, featured: false, installed: false },
+        { slug: "owner/repo", description: "Already here", stars: 7, featured: false, installed: true },
+      ],
+    });
+    installPlugin.mockResolvedValue({ kind: "ok", message: "Installed acme.review 1.0.0" });
+
+    const { findByText, getByTestId, queryByTestId } = render(<PluginsSettings />);
+    // Never fetched on load.
+    await findByText("Search GitHub");
+    expect(discoverPlugins).not.toHaveBeenCalled();
+
+    fireEvent.click(await findByText("Search GitHub"));
+    await waitFor(() => {
+      expect(discoverPlugins).toHaveBeenCalledTimes(1);
+    });
+
+    const featured = getByTestId("discovered-acme/aoe-review");
+    expect(featured.textContent).toContain("featured");
+    const unvetted = getByTestId("discovered-rando/aoe-thing");
+    expect(unvetted.textContent).toContain("unvetted");
+    const installed = getByTestId("discovered-owner/repo");
+    expect(installed.textContent).toContain("installed");
+    // Installed results offer no install button.
+    expect(installed.querySelector("button")).toBeNull();
+    expect(queryByTestId("discovered-missing")).toBeNull();
+
+    // Installing a result goes through the same unconfirmed-first flow.
+    const installButton = featured.querySelector("button");
+    expect(installButton).not.toBeNull();
+    fireEvent.click(installButton!);
+    await waitFor(() => {
+      expect(installPlugin).toHaveBeenCalledWith("acme/aoe-review", false);
+    });
   });
 
   it("load errors are surfaced, not swallowed", async () => {

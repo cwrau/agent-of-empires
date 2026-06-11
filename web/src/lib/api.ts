@@ -237,6 +237,19 @@ export function fetchPluginUpdates(): Promise<{ updates: Record<string, PluginUp
   return fetchJson<{ updates: Record<string, PluginUpdateStatus> }>("/api/plugins/updates");
 }
 
+/** One result of `GET /api/plugins/discover` (GitHub topic search). */
+export interface DiscoveredPlugin {
+  slug: string;
+  description: string | null;
+  stars: number;
+  featured: boolean;
+  installed: boolean;
+}
+
+export function discoverPlugins(): Promise<{ plugins: DiscoveredPlugin[] } | null> {
+  return fetchJson<{ plugins: DiscoveredPlugin[] }>("/api/plugins/discover");
+}
+
 /** One block inside a plugin dashboard card / session panel. */
 export type PluginUiBlock =
   | { type: "text"; text: string; severity?: PluginUiSeverity }

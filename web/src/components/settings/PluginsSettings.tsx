@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  discoverPlugins,
   fetchPluginUpdates,
   fetchPlugins,
   installPlugin,
   setPluginEnabled,
   uninstallPlugin,
   updatePlugin,
+  type DiscoveredPlugin,
   type PluginCapabilityPrompt,
   type PluginInfo,
   type PluginListResponse,
@@ -33,6 +35,9 @@ export function PluginsSettings() {
   /// Filled by the explicit "Check for updates" button; checks do network
   /// IO per GitHub plugin, so they never run on load.
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, PluginUpdateStatus> | null>(null);
+  /// Filled by the explicit "Discover plugins" button; the GitHub topic
+  /// search never runs on panel load.
+  const [discovered, setDiscovered] = useState<DiscoveredPlugin[] | null>(null);
 
   const reload = useCallback(async () => {
     const next = await fetchPlugins();
@@ -112,6 +117,23 @@ export function PluginsSettings() {
         );
       } else {
         setError("Update check failed.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDiscover = async () => {
+    setBusy(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await discoverPlugins();
+      if (result) {
+        setDiscovered(result.plugins);
+        setNotice(`${result.plugins.length} plugin repositor${result.plugins.length === 1 ? "y" : "ies"} found.`);
+      } else {
+        setError("Plugin discovery failed.");
       }
     } finally {
       setBusy(false);
@@ -263,6 +285,66 @@ export function PluginsSettings() {
             Install
           </button>
         </div>
+      </div>
+
+      <div className="rounded border border-surface-700 bg-surface-850 p-3">
+        <p className="mb-2 text-sm font-medium">Discover plugins</p>
+        <p className="mb-2 text-xs text-text-dim">
+          Searches GitHub for repositories tagged <code>aoe-plugin</code>. Runs only when you click; plugins not marked
+          featured are unvetted community code, reviewed by nobody, and still go through the capability approval before
+          anything is written.
+        </p>
+        <button
+          type="button"
+          className="rounded border border-surface-700 px-3 py-1 text-sm hover:bg-surface-800 disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void onDiscover()}
+        >
+          Search GitHub
+        </button>
+        {discovered && discovered.length === 0 && (
+          <p className="mt-2 text-xs text-text-dim">No plugin repositories found.</p>
+        )}
+        {discovered && discovered.length > 0 && (
+          <ul className="mt-3 space-y-2">
+            {discovered.map((found) => (
+              <li
+                key={found.slug}
+                className="flex items-start justify-between gap-3 rounded border border-surface-700 p-2"
+                data-testid={`discovered-${found.slug}`}
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-sm">{found.slug}</span>
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
+                        found.installed
+                          ? "bg-surface-700 text-text-dim"
+                          : found.featured
+                            ? "bg-emerald-900/60 text-emerald-300"
+                            : "bg-amber-900/60 text-amber-300"
+                      }`}
+                    >
+                      {found.installed ? "installed" : found.featured ? "featured" : "unvetted"}
+                    </span>
+                    <span className="text-[11px] text-text-dim">{found.stars} stars</span>
+                  </div>
+                  {found.description && <p className="mt-1 text-xs text-text-dim">{found.description}</p>}
+                </div>
+                {!found.installed && (
+                  <button
+                    type="button"
+                    className="shrink-0 rounded border border-surface-700 px-2 py-1 text-xs hover:bg-surface-800"
+                    disabled={busy}
+                    onClick={() => void runMutation({ kind: "install", source: found.slug }, false)}
+                  >
+                    Install
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {prompt && pendingAction && (

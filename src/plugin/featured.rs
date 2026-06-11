@@ -64,6 +64,12 @@ impl FeaturedIndex {
         self.featured.iter().any(|p| p.id == id)
     }
 
+    /// Whether a GitHub `owner/repo` slug is a featured source. Discovery
+    /// uses this to badge curated results.
+    pub fn contains_slug(&self, slug: &str) -> bool {
+        self.featured.iter().any(|p| p.slug == slug)
+    }
+
     /// Validate a staged plugin fetched from `slug` against the index.
     /// Errors are security refusals: a featured slug serving a different
     /// plugin id, or a pinned release whose tree hash does not match.

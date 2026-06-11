@@ -2420,6 +2420,13 @@
       "risk": "medium",
       "specs": ["src/components/__tests__/PluginUi.test.tsx"],
       "components": ["web/src/components/PluginUi.tsx", "web/src/hooks/usePluginUi.ts"]
+    },
+    {
+      "id": "settings.plugins-discover",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/settings/__tests__/PluginsSettings.test.tsx"],
+      "components": ["web/src/components/settings/PluginsSettings.tsx"]
     }
   ]
 }

@@ -107,6 +107,17 @@ pub async fn check_plugin_updates() -> Response {
     }
 }
 
+/// `GET /api/plugins/discover`: search GitHub for repositories tagged
+/// `aoe-plugin`, marked against the featured index and the local install
+/// state. Read-only but network-bound, so only ever called on an explicit
+/// dashboard action, never on panel load.
+pub async fn discover_plugins() -> Response {
+    match plugin::discover::discover().await {
+        Ok(found) => Json(json!({ "plugins": found })).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, "discover_failed", format!("{e:#}")),
+    }
+}
+
 /// `GET /api/ui/state`: every live plugin UI contribution entry plus the
 /// notification ring, with a revision counter the client polls against.
 /// Read-only cache snapshot; never touches a plugin worker.

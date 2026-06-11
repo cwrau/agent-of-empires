@@ -32,6 +32,24 @@ back when re-enabled.
 | `aoe.attention` | Attention-sort metadata (extraction in progress). | Attention sort keeps working from core. |
 | `aoe.web` | The web dashboard management marker. Included and enabled by default; absent only from `--no-default-features` source builds. | `aoe serve` refuses to start until re-enabled. |
 
+## Discovering plugins
+
+```sh
+aoe plugin discover
+```
+
+Searches GitHub for repositories tagged with the `aoe-plugin` topic and
+lists them curated-first (featured plugins, then by stars). The same search
+sits behind the `d` key in the TUI plugin manager and the "Search GitHub"
+button on the dashboard's Plugins tab. Discovery only ever runs on that
+explicit action; nothing scans the network in the background.
+
+Results not marked `featured` are unvetted community code that nobody has
+reviewed. Anything you install from discovery still goes through the normal
+capability approval, and a featured release is additionally verified against
+its maintainer-pinned tree hash. Tag your own plugin repository with the
+`aoe-plugin` topic to make it discoverable.
+
 ## Installing community plugins
 
 ```sh

@@ -9,6 +9,7 @@
 
 pub mod cli_graft;
 pub mod core_overrides;
+pub mod discover;
 pub mod featured;
 pub mod grants;
 pub mod host;

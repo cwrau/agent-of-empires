@@ -1452,6 +1452,7 @@ fn build_router(state: Arc<AppState>) -> Router {
             get(api::list_plugins).post(api::install_plugin),
         )
         .route("/api/plugins/updates", get(api::check_plugin_updates))
+        .route("/api/plugins/discover", get(api::discover_plugins))
         .route("/api/ui/state", get(api::get_plugin_ui_state))
         .route("/api/plugins/{id}", delete(api::uninstall_plugin))
         .route("/api/plugins/{id}/enabled", post(api::set_plugin_enabled))

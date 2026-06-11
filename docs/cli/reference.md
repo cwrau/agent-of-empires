@@ -47,6 +47,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe plugin update`↴](#aoe-plugin-update)
 * [`aoe plugin hash`↴](#aoe-plugin-hash)
 * [`aoe plugin outdated`↴](#aoe-plugin-outdated)
+* [`aoe plugin discover`↴](#aoe-plugin-discover)
 * [`aoe settings`↴](#aoe-settings)
 * [`aoe settings explain`↴](#aoe-settings-explain)
 * [`aoe profile`↴](#aoe-profile)
@@ -669,6 +670,7 @@ Manage plugins (install, enable, disable, update)
 * `update` — Update an installed plugin from its recorded source
 * `hash` — Print the tree hash of a plugin directory (used to pin featured releases)
 * `outdated` — Check installed plugins against their sources for available updates
+* `discover` — Search GitHub for community plugins (repositories tagged `aoe-plugin`)
 
 
 
@@ -777,6 +779,14 @@ Print the tree hash of a plugin directory (used to pin featured releases)
 Check installed plugins against their sources for available updates
 
 **Usage:** `aoe plugin outdated`
+
+
+
+## `aoe plugin discover`
+
+Search GitHub for community plugins (repositories tagged `aoe-plugin`)
+
+**Usage:** `aoe plugin discover`
 
 
 
