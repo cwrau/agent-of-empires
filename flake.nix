@@ -32,6 +32,11 @@
             src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
             inherit nativeBuildInputs buildInputs;
+            # Default cargo features now include `serve` (web dashboard),
+            # whose build.rs step wants npm or AOE_WEB_DIST. The base
+            # package and checks stay TUI-only so they build hermetically
+            # without the frontend; aoe-with-web opts back in below.
+            cargoExtraArgs = "--no-default-features";
           };
 
           # Build only workspace dependencies first (for caching)
@@ -39,7 +44,7 @@
 
           aoe = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
-            cargoExtraArgs = "--package agent-of-empires";
+            cargoExtraArgs = "--package agent-of-empires --no-default-features";
             doCheck = false;
             postInstall = ''
               installShellCompletion --cmd aoe \
@@ -87,10 +92,11 @@
           # build.rs respects AOE_WEB_DIST to use the pre-built frontend.
           # buildDepsOnly uses a dummy crate source so AOE_WEB_DIST is irrelevant there.
           commonArgsWithWeb = commonArgs // {
-            cargoExtraArgs = "--package agent-of-empires --features serve";
+            # Default features include `serve`, so no explicit flag needed.
+            cargoExtraArgs = "--package agent-of-empires";
           };
 
-          # Rust dep cache compiled with --features serve (no npm involved).
+          # Rust dep cache compiled with the serve deps (no npm involved).
           cargoArtifactsWithWeb = craneLib.buildDepsOnly commonArgsWithWeb;
 
           aoeWithWeb = craneLib.buildPackage (commonArgsWithWeb // {
@@ -150,7 +156,7 @@
             packages = with pkgs; [
               rust-analyzer
               tmux
-              nodejs # for web frontend development (--features serve)
+              nodejs # for web frontend development (default build includes the dashboard)
             ];
           };
         };

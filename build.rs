@@ -201,7 +201,10 @@ fn build_frontend() {
 
     assert!(
         Command::new("npm").arg("--version").output().is_ok(),
-        "npm is required to build with --features serve. Install Node.js: https://nodejs.org/"
+        "npm is required because the web dashboard is built by default. \
+         Install Node.js (https://nodejs.org/), set AOE_WEB_DIST to a prebuilt \
+         frontend directory, or build a TUI-only binary with \
+         `cargo build --no-default-features`."
     );
 
     maybe_install_web_deps();
