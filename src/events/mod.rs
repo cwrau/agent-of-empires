@@ -143,18 +143,21 @@ impl EventBus {
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![seq as i64, topic, payload.to_string(), published_at as i64],
             )?;
-            // Per-topic retention: drop the oldest rows beyond the cap. A
-            // retention failure keeps extra rows but the insert is already
-            // durable, so the seq still advances.
-            let retention = conn.execute(
+            // Per-topic retention: drop the oldest rows beyond the cap. The
+            // insert above is already durable, so a retention failure must
+            // not surface as a failed publish (callers would retry and
+            // double-publish); it only means extra rows stay until the next
+            // successful pass.
+            if let Err(e) = conn.execute(
                 "DELETE FROM bus_events WHERE topic = ?1 AND seq NOT IN (
                     SELECT seq FROM bus_events WHERE topic = ?1
                     ORDER BY seq DESC LIMIT ?2
                 )",
                 rusqlite::params![topic, self.max_events_per_topic as i64],
-            );
+            ) {
+                tracing::warn!(target: "events", topic, error = %e, "retention prune failed; rows kept");
+            }
             self.next_seq.store(seq + 1, Ordering::SeqCst);
-            retention?;
         }
         let event = Arc::new(BusEvent {
             seq,
