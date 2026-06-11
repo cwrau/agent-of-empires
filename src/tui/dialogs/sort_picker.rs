@@ -65,13 +65,17 @@ impl SortPickerDialog {
                 },
             });
         }
-        let current = match current_plugin {
-            Some((plugin_id, contribution_id)) => SortChoice::Plugin {
+        // A persisted plugin sort whose contribution vanished (plugin
+        // disabled/uninstalled) falls back to the core order, not to row 0:
+        // otherwise Enter on the pre-selected row silently switches the
+        // user to Newest.
+        let current = current_plugin
+            .map(|(plugin_id, contribution_id)| SortChoice::Plugin {
                 plugin_id,
                 contribution_id,
-            },
-            None => SortChoice::Core(current_order),
-        };
+            })
+            .filter(|choice| rows.iter().any(|r| &r.choice == choice))
+            .unwrap_or(SortChoice::Core(current_order));
         let selected = rows.iter().position(|r| r.choice == current).unwrap_or(0);
         Self {
             rows,
