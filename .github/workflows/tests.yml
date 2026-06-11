@@ -88,12 +88,12 @@ jobs:
       - name: Cargo test (TUI-only, plugins disabled)
         if: runner.os == 'Linux'
         run: cargo test --no-default-features --features no-default-plugins --lib --bins
-      # The third feature corner: serve off, builtin plugins on. Cheap
-      # compile-only gate so plugin registration code that assumes serve
-      # types can't sneak in.
+      # The third feature corner: serve off, builtin plugins on. Compile
+      # gate (including test/e2e targets, which plain check skips) so
+      # plugin registration code that assumes serve types can't sneak in.
       - name: Cargo check (TUI-only, default plugins)
         if: runner.os == 'Linux'
-        run: cargo check --no-default-features
+        run: cargo check --no-default-features --all-targets
 
   macos-acp-e2e:
     # The acp live-daemon e2e tests exercise the structured-view

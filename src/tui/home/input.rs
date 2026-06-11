@@ -2579,9 +2579,9 @@ impl HomeView {
         {
             self.info_dialog = Some(InfoDialog::new(
                 "Serve unavailable",
-                "This `aoe` binary was built with `--no-default-features`, \
-                 so the web dashboard, local network serving, and \
-                 Cloudflare Tunnel integration are not included.\n\n\
+                "This `aoe` binary was built without the web dashboard \
+                 (a `--no-default-features` source build), so local network \
+                 serving and Cloudflare Tunnel integration are not included.\n\n\
                  To serve to your phone (LAN / Tailscale / tunnel):\n\
                    \u{2022} Install a release build from GitHub Releases, or\n\
                    \u{2022} Build from source with default features:\n\
@@ -2936,8 +2936,7 @@ impl HomeView {
                 #[cfg(not(feature = "serve"))]
                 {
                     return Some(Action::SetTransientStatus(
-                        "Acp session: rebuild with default features (plain cargo build) to attach"
-                            .to_string(),
+                        "Acp session: rebuild with default features to attach".to_string(),
                     ));
                 }
             }
@@ -3017,8 +3016,7 @@ impl HomeView {
                 #[cfg(not(feature = "serve"))]
                 {
                     return Some(Action::SetTransientStatus(
-                        "Acp session: rebuild with default features (plain cargo build) to attach"
-                            .to_string(),
+                        "Acp session: rebuild with default features to attach".to_string(),
                     ));
                 }
             }
