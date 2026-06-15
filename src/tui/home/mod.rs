@@ -5421,7 +5421,7 @@ impl HomeView {
     /// path uses `try_refresh_from_config_watcher` instead, which
     /// preserves previous in-memory state on parse failure rather than
     /// silently applying defaults.
-    pub fn refresh_from_config(&mut self, origin: ConfigRefreshOrigin) {
+    pub(super) fn refresh_from_config(&mut self, origin: ConfigRefreshOrigin) {
         let profile = self.config_profile();
         let config = resolve_config_or_warn(&profile);
         self.apply_config_to_state(config, origin);
