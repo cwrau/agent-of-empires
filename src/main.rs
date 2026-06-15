@@ -50,6 +50,15 @@ async fn main() -> Result<()> {
     } else {
         let matches = agent_of_empires::plugin::cli_graft::graft_all(root, &grafted).get_matches();
         match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
+            // A grafted subcommand is unknown to the derive, which parses it
+            // as `command: None` rather than erroring. Try plugin dispatch
+            // before treating None as the bare-`aoe` TUI launch.
+            Ok(cli) if cli.command.is_none() => {
+                match agent_of_empires::plugin::cli_graft::dispatch(&matches, &grafted) {
+                    Some(outcome) => return outcome,
+                    None => cli,
+                }
+            }
             Ok(cli) => cli,
             Err(e) => match agent_of_empires::plugin::cli_graft::dispatch(&matches, &grafted) {
                 Some(outcome) => return outcome,
