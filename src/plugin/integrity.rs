@@ -34,6 +34,32 @@ pub fn tree_hash(root: &Path) -> Result<String> {
     ))
 }
 
+/// Reject symlinks and non-regular files (FIFO / socket / device) in a plugin
+/// tree, returning whether the entry is a directory to recurse into. The
+/// `is_symlink()` check MUST come first: `is_dir()` / `is_file()` follow
+/// symlinks, so a `link -> /dev/zero` or `link -> /etc/passwd` would otherwise
+/// be enrolled as a regular file and read through, hanging the install or
+/// exfiltrating host content into the tree hash. Shared with
+/// `install::copy_plugin_tree` so the hash domain and the copied tree agree.
+pub(crate) fn dir_or_reject(ft: &std::fs::FileType, path: &Path) -> Result<bool> {
+    if ft.is_symlink() {
+        anyhow::bail!(
+            "plugin tree contains a symlink: {} (symlinks are not allowed)",
+            path.display()
+        );
+    }
+    if ft.is_dir() {
+        return Ok(true);
+    }
+    if ft.is_file() {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "plugin tree contains a non-regular file: {}",
+        path.display()
+    );
+}
+
 fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
@@ -42,7 +68,7 @@ fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) -> Resul
             continue;
         }
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
+        if dir_or_reject(&entry.file_type()?, &path)? {
             collect(root, &path, files)?;
         } else {
             let rel = path
@@ -91,6 +117,16 @@ mod tests {
         let before = tree_hash(dir.path()).unwrap();
         write(dir.path(), "bin/worker", "v2");
         assert_ne!(before, tree_hash(dir.path()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_in_tree_is_rejected_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "aoe-plugin.toml", "id = \"x\"");
+        std::os::unix::fs::symlink("/etc/passwd", dir.path().join("evil-link")).unwrap();
+        let err = tree_hash(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "got: {err}");
     }
 
     #[test]

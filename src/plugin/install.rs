@@ -436,7 +436,7 @@ fn copy_plugin_tree(src: &Path, dst: &Path) -> Result<()> {
         }
         let from = entry.path();
         let to = dst.join(&name);
-        if entry.file_type()?.is_dir() {
+        if super::integrity::dir_or_reject(&entry.file_type()?, &from)? {
             copy_plugin_tree(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
