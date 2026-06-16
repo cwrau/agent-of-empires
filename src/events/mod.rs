@@ -136,7 +136,7 @@ impl EventBus {
             // counter only after the row is durable: a failed insert must not
             // move highest_seq() past a row that does not exist, or replay
             // high-water marks would skip it.
-            let conn = self.conn.lock().expect("event bus lock poisoned");
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
             seq = self.next_seq.load(Ordering::SeqCst);
             conn.execute(
                 "INSERT INTO bus_events (seq, topic, payload_json, created_at)
@@ -185,7 +185,7 @@ impl EventBus {
         after_seq: u64,
         limit: usize,
     ) -> Result<Vec<BusEvent>> {
-        let conn = self.conn.lock().expect("event bus lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT seq, topic, payload_json, created_at FROM bus_events
              WHERE seq > ?1 ORDER BY seq ASC",

@@ -44,6 +44,50 @@ const REPLAY_LIMIT: usize = 1000;
 /// Spawns per plugin per process before the host refuses to respawn.
 const RESPAWN_BUDGET: u32 = 3;
 
+/// Hard cap on a single worker stdout/stderr line. `BufRead::read_line` grows
+/// an unbounded `String`; a worker streaming bytes without a newline would
+/// OOM the host. 8 MiB is far above any real JSON-RPC line.
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Depth of a worker's pending-write queue. Callers `try_send` and never
+/// block: a worker that stops reading its stdin fills the OS pipe, the
+/// dedicated writer thread blocks on it, this queue fills, and further sends
+/// fail fast as a wire error (the worker is then killed) instead of hanging
+/// the TUI/daemon caller. See finding on `writeln!(stdin)` blocking.
+const WRITE_QUEUE_CAPACITY: usize = 64;
+
+/// Depth of a worker's host-call dispatch queue. The reader thread hands
+/// worker -> host requests here so its only job is parse-and-route; the
+/// dedicated dispatch thread does the heavy host I/O (storage reads, the
+/// cross-process flock) without ever blocking stdout draining.
+const DISPATCH_QUEUE_CAPACITY: usize = 64;
+
+/// Max topics a single `events.subscribe` may register, and the max length of
+/// each: `topic_matches` runs over the list per delivered event, so an
+/// unbounded list is a CPU-DoS on every publish.
+const MAX_SUBSCRIBE_TOPICS: usize = 64;
+const MAX_TOPIC_BYTES: usize = 256;
+
+/// A crash older than this no longer counts against the respawn budget, so a
+/// plugin that fails once a day is not permanently disabled.
+const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
+
+/// Lock a `Mutex` recovering from poisoning. Plugin code is the untrusted
+/// surface here: a panic while a host lock is held (a malformed-JSON handler,
+/// a `serde_json::from_value` on hostile input) would otherwise poison the
+/// lock and crash the whole daemon on the next `expect`. The host's
+/// invariants do not depend on partial-mutation safety, so reusing the data
+/// after a panic is correct and strictly better than tearing the daemon down.
+trait LockExt<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 static HOST: OnceLock<PluginHost> = OnceLock::new();
 
 /// The process-wide host. Workers spawn on first use per plugin.
@@ -53,24 +97,54 @@ pub fn host() -> &'static PluginHost {
 
 pub struct PluginHost {
     workers: Mutex<HashMap<String, Arc<Worker>>>,
-    spawn_counts: Mutex<HashMap<String, u32>>,
+    /// Recent spawn timestamps per plugin. The budget counts only spawns
+    /// inside [`RESPAWN_WINDOW`], so a plugin that crashes occasionally over a
+    /// long-running daemon is not permanently tombstoned; a genuine crash loop
+    /// (>= [`RESPAWN_BUDGET`] within the window) still trips it.
+    recent_spawns: Mutex<HashMap<String, Vec<std::time::Instant>>>,
 }
 
 struct Worker {
     plugin_id: String,
     capabilities: Vec<Capability>,
     child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    /// Lines to write to the worker's stdin. A dedicated writer thread owns
+    /// the `ChildStdin` and drains this; senders `try_send` so a blocked pipe
+    /// never blocks the caller.
+    writer_tx: mpsc::SyncSender<String>,
+    /// Worker -> host requests handed off from the reader to the dispatch
+    /// thread, keeping host I/O off the stdout-draining path.
+    dispatch_tx: mpsc::SyncSender<HostCall>,
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     alive: AtomicBool,
+    /// Whether this worker already has a live event-forwarder thread; caps it
+    /// to one so a subscribe loop cannot spawn unbounded threads.
+    has_forwarder: AtomicBool,
+}
+
+/// A worker -> host request queued for the dispatch thread.
+struct HostCall {
+    id: u64,
+    method: String,
+    params: Value,
+}
+
+/// A freshly spawned worker and the raw handles its IO threads need; the
+/// threads start in [`start_io`] once the `Arc<Worker>` exists.
+struct SpawnedWorker {
+    worker: Worker,
+    stdout: std::process::ChildStdout,
+    stdin: ChildStdin,
+    writer_rx: mpsc::Receiver<String>,
+    dispatch_rx: mpsc::Receiver<HostCall>,
 }
 
 impl PluginHost {
     fn new() -> Self {
         Self {
             workers: Mutex::new(HashMap::new()),
-            spawn_counts: Mutex::new(HashMap::new()),
+            recent_spawns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -117,24 +191,14 @@ impl PluginHost {
     /// fresh budget. Still-active plugins respawn on their next call.
     pub fn reset(&self) {
         self.shutdown();
-        self.spawn_counts.lock().expect("spawn counts lock").clear();
+        self.recent_spawns.lock_safe().clear();
     }
 
     fn mark_dead(&self, worker: &Arc<Worker>) {
-        worker.alive.store(false, Ordering::SeqCst);
-        if let Ok(mut child) = worker.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        reap_worker(worker);
         self.workers
-            .lock()
-            .expect("workers lock")
+            .lock_safe()
             .retain(|_, w| !Arc::ptr_eq(w, worker));
-        // Wake every caller still waiting on this worker.
-        let mut pending = worker.pending.lock().expect("pending lock");
-        for (_, tx) in pending.drain() {
-            let _ = tx.send(Err("worker died".to_string()));
-        }
     }
 
     fn ensure_worker(&self, plugin_id: &str) -> Result<Arc<Worker>> {
@@ -143,11 +207,21 @@ impl PluginHost {
         // worker" and spawn duplicates (each burning respawn budget). The
         // spawn itself is per-plugin rare and fast; holding the map lock
         // through it is the simple correct shape.
-        let mut workers = self.workers.lock().expect("workers lock");
+        let mut workers = self.workers.lock_safe();
         if let Some(worker) = workers.get(plugin_id) {
             if worker.alive.load(Ordering::SeqCst) {
                 return Ok(worker.clone());
             }
+        }
+        // A dead entry can linger: a stdin write failure flips `alive` to
+        // false without tearing the child down, and the reader's terminal
+        // mark_dead is skipped once the Arc is dropped. Reap it before the
+        // insert below overwrites the slot, or the old `Child` would drop
+        // without `wait()` and leak a zombie (or an orphaned third-party
+        // process). The reader thread is keyed to a Weak, so dropping our
+        // strong ref here is safe.
+        if let Some(old) = workers.remove(plugin_id) {
+            reap_worker(&old);
         }
         let registry = super::registry();
         let plugin = registry
@@ -155,23 +229,34 @@ impl PluginHost {
             .filter(|p| p.active())
             .ok_or_else(|| anyhow!("plugin {plugin_id} is not active"))?;
         {
-            let mut counts = self.spawn_counts.lock().expect("spawn counts lock");
-            let count = counts.entry(plugin_id.to_string()).or_insert(0);
-            if *count >= RESPAWN_BUDGET {
+            let now = std::time::Instant::now();
+            let mut spawns = self.recent_spawns.lock_safe();
+            let times = spawns.entry(plugin_id.to_string()).or_default();
+            // Drop spawns older than the window so an occasional crash decays
+            // instead of accumulating toward a permanent tombstone.
+            times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+            if times.len() as u32 >= RESPAWN_BUDGET {
                 bail!(
-                    "plugin {plugin_id} worker crashed {RESPAWN_BUDGET} times; not respawning \
-                     (disable and re-enable the plugin to reset)"
+                    "plugin {plugin_id} worker crashed {RESPAWN_BUDGET} times within \
+                     {}s; not respawning (disable and re-enable the plugin to reset)",
+                    RESPAWN_WINDOW.as_secs()
                 );
             }
-            *count += 1;
+            times.push(now);
         }
-        let (worker, stdout) = spawn_worker(plugin)?;
+        let SpawnedWorker {
+            worker,
+            stdout,
+            stdin,
+            writer_rx,
+            dispatch_rx,
+        } = spawn_worker(plugin)?;
         let worker = Arc::new(worker);
         workers.insert(plugin_id.to_string(), worker.clone());
         drop(workers);
-        // The reader can call mark_dead (which takes the workers lock) the
-        // moment it starts, so it must spawn after the lock is released.
-        start_reader(&worker, stdout);
+        // The IO threads can call mark_dead (which takes the workers lock) the
+        // moment they start, so they must spawn after the lock is released.
+        start_io(&worker, stdout, stdin, writer_rx, dispatch_rx);
         Ok(worker)
     }
 }
@@ -202,21 +287,22 @@ fn call_worker(
 ) -> Result<Value, CallError> {
     let id = worker.next_id.fetch_add(1, Ordering::SeqCst);
     let (tx, rx) = mpsc::channel();
-    worker.pending.lock().expect("pending lock").insert(id, tx);
+    worker.pending.lock_safe().insert(id, tx);
     let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-    let write_result = {
-        let mut stdin = worker.stdin.lock().expect("stdin lock");
-        writeln!(stdin, "{line}").and_then(|_| stdin.flush())
-    };
-    if let Err(e) = write_result {
-        worker.pending.lock().expect("pending lock").remove(&id);
-        return Err(CallError::Wire(format!("worker write failed: {e}")));
+    // Non-blocking hand-off to the writer thread: a full queue means the
+    // worker stopped reading its stdin (the writer thread is blocked on the
+    // OS pipe), so fail fast as a wire error rather than block the caller.
+    if worker.writer_tx.try_send(line.to_string()).is_err() {
+        worker.pending.lock_safe().remove(&id);
+        return Err(CallError::Wire(
+            "worker write queue full or closed".to_string(),
+        ));
     }
     match rx.recv_timeout(timeout) {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(rpc_error)) => Err(CallError::Rpc(rpc_error)),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            worker.pending.lock().expect("pending lock").remove(&id);
+            worker.pending.lock_safe().remove(&id);
             Err(CallError::Wire(format!(
                 "timed out after {timeout:?}; worker killed"
             )))
@@ -281,7 +367,7 @@ fn worker_command(plugin: &LoadedPlugin) -> Result<(PathBuf, Vec<String>, PathBu
     }
 }
 
-fn spawn_worker(plugin: &LoadedPlugin) -> Result<(Worker, std::process::ChildStdout)> {
+fn spawn_worker(plugin: &LoadedPlugin) -> Result<SpawnedWorker> {
     let (entrypoint, args, workdir) = worker_command(plugin)?;
     let mut cmd = super::sandbox::backend().command(&entrypoint, &args, &workdir);
     cmd.stdin(Stdio::piped())
@@ -290,47 +376,194 @@ fn spawn_worker(plugin: &LoadedPlugin) -> Result<(Worker, std::process::ChildStd
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning plugin {} worker", plugin.id()))?;
-    let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    let id = plugin.id().to_string();
+    let stripped = |stream| anyhow!("sandbox backend stripped {stream} for {id}");
+    let stdin = child.stdin.take().ok_or_else(|| stripped("stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| stripped("stdout"))?;
+    let stderr = child.stderr.take().ok_or_else(|| stripped("stderr"))?;
+
+    let (writer_tx, writer_rx) = mpsc::sync_channel::<String>(WRITE_QUEUE_CAPACITY);
+    let (dispatch_tx, dispatch_rx) = mpsc::sync_channel::<HostCall>(DISPATCH_QUEUE_CAPACITY);
 
     let worker = Worker {
-        plugin_id: plugin.id().to_string(),
+        plugin_id: id.clone(),
         capabilities: plugin.manifest.capabilities.clone(),
         child: Mutex::new(child),
-        stdin: Mutex::new(stdin),
+        writer_tx,
+        dispatch_tx,
         next_id: AtomicU64::new(1),
         pending: Mutex::new(HashMap::new()),
         alive: AtomicBool::new(true),
+        has_forwarder: AtomicBool::new(false),
     };
 
-    // stderr -> tracing, one line at a time.
-    let id_for_stderr = worker.plugin_id.clone();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            warn!(target: "plugin", plugin = %id_for_stderr, "worker stderr: {line}");
+    // stderr -> tracing, one capped line at a time (this thread needs no
+    // Arc, so it starts here rather than in start_io).
+    let id_for_stderr = id.clone();
+    spawn_named(&format!("plugin-{id}-stderr"), move || {
+        let mut reader = BufReader::new(stderr);
+        let mut buf = Vec::new();
+        loop {
+            match read_capped_line(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
+                    warn!(target: "plugin", plugin = %id_for_stderr, "worker stderr: {}", line.trim_end());
+                }
+                Err(e) => {
+                    warn!(target: "plugin", plugin = %id_for_stderr, "worker stderr closed: {e}");
+                    break;
+                }
+            }
         }
     });
 
-    debug!(target: "plugin", plugin = %worker.plugin_id, "worker spawned");
-    Ok((worker, stdout))
+    debug!(target: "plugin", plugin = %id, "worker spawned");
+    Ok(SpawnedWorker {
+        worker,
+        stdout,
+        stdin,
+        writer_rx,
+        dispatch_rx,
+    })
 }
 
-/// Start the reader thread for `worker`. Split from `spawn_worker` because
-/// the thread needs the final `Arc` to route responses and host-API calls.
-fn start_reader(worker: &Arc<Worker>, stdout: std::process::ChildStdout) {
-    let weak = Arc::downgrade(worker);
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            let Some(worker) = weak.upgrade() else { break };
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+/// Spawn a named OS thread, so a stuck host shows the plugin and role in
+/// `gstack` / `lldb thread list` instead of `<unnamed>`.
+fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
+    let _ = std::thread::Builder::new().name(name.to_string()).spawn(f);
+}
+
+/// Read one `\n`-terminated line into `buf` (including the newline), capped at
+/// [`MAX_LINE_BYTES`]. `Ok(0)` is EOF; an over-cap line is an error so a
+/// newline-less flood cannot grow `buf` without bound and OOM the host.
+fn read_capped_line<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+    buf.clear();
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            return Ok(buf.len());
+        }
+        if let Some(i) = available.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&available[..=i]);
+            reader.consume(i + 1);
+            return Ok(buf.len());
+        }
+        buf.extend_from_slice(available);
+        let consumed = available.len();
+        reader.consume(consumed);
+        if buf.len() > MAX_LINE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("worker line exceeded {MAX_LINE_BYTES} bytes"),
+            ));
+        }
+    }
+}
+
+/// Reap a worker's child and wake its pending callers without touching the
+/// workers map. Shared by `mark_dead` and the dead-entry sweep in
+/// `ensure_worker` (which already holds the map lock, so it must not re-enter
+/// it through `mark_dead`).
+fn reap_worker(worker: &Worker) {
+    worker.alive.store(false, Ordering::SeqCst);
+    // Let the forwarder thread (if any) observe death on its next event and
+    // exit, and allow a respawned worker to subscribe again.
+    worker.has_forwarder.store(false, Ordering::SeqCst);
+    if let Ok(mut child) = worker.child.lock() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let mut pending = worker.pending.lock_safe();
+    for (_, tx) in pending.drain() {
+        let _ = tx.send(Err("worker died".to_string()));
+    }
+}
+
+/// Start the per-worker IO threads (reader, writer, dispatch). Split from
+/// `spawn_worker` because they need the final `Arc` to route responses, run
+/// host calls, and tear the worker down on EOF.
+fn start_io(
+    worker: &Arc<Worker>,
+    stdout: std::process::ChildStdout,
+    stdin: ChildStdin,
+    writer_rx: mpsc::Receiver<String>,
+    dispatch_rx: mpsc::Receiver<HostCall>,
+) {
+    let id = worker.plugin_id.clone();
+
+    // Writer: owns ChildStdin, drains the bounded queue. A write failure flips
+    // `alive` so the next call observes the death; the reader's EOF then reaps.
+    let weak_writer = Arc::downgrade(worker);
+    spawn_named(&format!("plugin-{id}-writer"), move || {
+        let mut stdin = stdin;
+        while let Ok(line) = writer_rx.recv() {
+            if writeln!(stdin, "{line}")
+                .and_then(|_| stdin.flush())
+                .is_err()
+            {
+                if let Some(worker) = weak_writer.upgrade() {
+                    worker.alive.store(false, Ordering::SeqCst);
+                }
+                break;
+            }
+        }
+    });
+
+    // Dispatch: runs worker -> host calls off the reader thread (heavy storage
+    // I/O and the cross-process flock must not block stdout draining).
+    let weak_dispatch = Arc::downgrade(worker);
+    spawn_named(&format!("plugin-{id}-dispatch"), move || {
+        while let Ok(call) = dispatch_rx.recv() {
+            let Some(worker) = weak_dispatch.upgrade() else {
+                break;
+            };
+            let response = match handle_host_call(&worker, &call.method, call.params) {
+                Ok(result) => json!({ "jsonrpc": "2.0", "id": call.id, "result": result }),
+                Err(e) => json!({
+                    "jsonrpc": "2.0", "id": call.id,
+                    "error": { "code": -32000, "message": format!("{e:#}") },
+                }),
+            };
+            write_line(&worker, &response);
+        }
+    });
+
+    // Reader: parse-and-route only.
+    let weak_reader = Arc::downgrade(worker);
+    spawn_named(&format!("plugin-{id}-reader"), move || {
+        let mut reader = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        loop {
+            match read_capped_line(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    if let Some(worker) = weak_reader.upgrade() {
+                        warn!(target: "plugin", plugin = %worker.plugin_id, "worker stdout error: {e}");
+                    }
+                    break;
+                }
+            }
+            let Some(worker) = weak_reader.upgrade() else {
+                break;
+            };
+            let text = String::from_utf8_lossy(&buf);
+            let trimmed = text.trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
                 warn!(target: "plugin", plugin = %worker.plugin_id, "non-JSON worker line ignored");
                 continue;
             };
             route_message(&worker, msg);
         }
-        if let Some(worker) = weak.upgrade() {
+        if let Some(worker) = weak_reader.upgrade() {
             // Full teardown, not just a flag flip: a worker that closed
             // stdout without exiting would otherwise keep running as a
             // stray process once a replacement is spawned. mark_dead kills
@@ -357,21 +590,28 @@ fn route_message(worker: &Arc<Worker>, msg: Value) {
             } else {
                 Ok(msg.get("result").cloned().unwrap_or(Value::Null))
             };
-            if let Some(tx) = worker.pending.lock().expect("pending lock").remove(&id) {
+            if let Some(tx) = worker.pending.lock_safe().remove(&id) {
                 let _ = tx.send(outcome);
             }
         }
-        // Worker -> host request: the capability-gated host API.
+        // Worker -> host request: hand to the dispatch thread so the heavy
+        // host I/O runs off this reader (keeping stdout draining). A full
+        // queue is answered immediately with a busy error so the worker is
+        // never left waiting on a request the host silently dropped.
         (Some(id), Some(method)) => {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
-            let response = match handle_host_call(worker, method, params) {
-                Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-                Err(e) => json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "error": { "code": -32000, "message": format!("{e:#}") },
-                }),
+            let call = HostCall {
+                id,
+                method: method.to_string(),
+                params,
             };
-            write_line(worker, &response);
+            if worker.dispatch_tx.try_send(call).is_err() {
+                let response = json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32000, "message": "host dispatch queue saturated" },
+                });
+                write_line(worker, &response);
+            }
         }
         // Worker notification; nothing defined in v1.
         (None, Some(method)) => {
@@ -382,11 +622,9 @@ fn route_message(worker: &Arc<Worker>, msg: Value) {
 }
 
 fn write_line(worker: &Worker, value: &Value) {
-    let mut stdin = worker.stdin.lock().expect("stdin lock");
-    if writeln!(stdin, "{value}")
-        .and_then(|_| stdin.flush())
-        .is_err()
-    {
+    // Non-blocking hand-off to the writer thread; a full/closed queue means
+    // the worker is not draining its stdin, so mark it dead.
+    if worker.writer_tx.try_send(value.to_string()).is_err() {
         worker.alive.store(false, Ordering::SeqCst);
     }
 }
@@ -439,6 +677,26 @@ fn handle_host_call(worker: &Arc<Worker>, method: &str, params: Value) -> Result
                 .get("topics")
                 .and_then(|t| serde_json::from_value(t.clone()).ok())
                 .ok_or_else(|| anyhow!("events.subscribe needs topics: [string]"))?;
+            // Bound the subscription so a worker cannot turn every published
+            // event into a huge linear scan in the forwarder thread.
+            if topics.len() > MAX_SUBSCRIBE_TOPICS {
+                bail!(
+                    "events.subscribe accepts at most {MAX_SUBSCRIBE_TOPICS} topics (got {})",
+                    topics.len()
+                );
+            }
+            if let Some(too_long) = topics.iter().find(|t| t.len() > MAX_TOPIC_BYTES) {
+                bail!(
+                    "events.subscribe topic exceeds {MAX_TOPIC_BYTES} bytes: {:?}",
+                    &too_long[..MAX_TOPIC_BYTES.min(too_long.len())]
+                );
+            }
+            // One forwarder thread per worker: a second subscribe replaces the
+            // first (the old thread exits when it next sees the flag cleared),
+            // so a subscribe loop cannot spawn unbounded threads.
+            if worker.has_forwarder.swap(true, Ordering::SeqCst) {
+                bail!("this worker already has an active subscription");
+            }
             let after_seq = params.get("after_seq").and_then(Value::as_u64);
             start_event_forwarder(worker, topics, after_seq)?;
             Ok(json!({ "subscribed": true }))
@@ -609,20 +867,27 @@ fn start_event_forwarder(
 ) -> Result<()> {
     let bus = crate::events::global()?.clone();
     let weak = Arc::downgrade(worker);
-    std::thread::spawn(move || {
+    let id = worker.plugin_id.clone();
+    spawn_named(&format!("plugin-{id}-events"), move || {
+        // Capture the floor BEFORE subscribing: an event published between
+        // this read and the live receiver attaching has seq > floor, so the
+        // replay below delivers it instead of the live loop dropping it via
+        // the `seq <= last_seq` filter (the cold-subscribe lost-event race).
+        let floor = bus.highest_seq();
         let mut rx = bus.subscribe();
-        let mut last_seq = after_seq.unwrap_or_else(|| bus.highest_seq());
-        if after_seq.is_some() {
-            match bus.replay_from(&topics, last_seq, REPLAY_LIMIT) {
-                Ok(events) => {
-                    for event in events {
-                        last_seq = event.seq;
-                        let Some(worker) = weak.upgrade() else { return };
-                        notify_event(&worker, &event);
-                    }
+        let mut last_seq = after_seq.unwrap_or(floor);
+        // Always replay from last_seq. For an explicit after_seq it is the
+        // caller's resume point; for a fresh subscribe it is `floor`, so the
+        // replay covers only the subscribe-race window and nothing older.
+        match bus.replay_from(&topics, last_seq, REPLAY_LIMIT) {
+            Ok(events) => {
+                for event in events {
+                    last_seq = event.seq;
+                    let Some(worker) = weak.upgrade() else { return };
+                    notify_event(&worker, &event);
                 }
-                Err(e) => warn!(target: "plugin", "event replay failed: {e:#}"),
             }
+            Err(e) => warn!(target: "plugin", "event replay failed: {e:#}"),
         }
         loop {
             match rx.blocking_recv() {
@@ -674,6 +939,19 @@ mod tests {
     use super::*;
     use aoe_plugin_api::PluginManifest;
 
+    fn spawn_and_start(plugin: &LoadedPlugin) -> Arc<Worker> {
+        let SpawnedWorker {
+            worker,
+            stdout,
+            stdin,
+            writer_rx,
+            dispatch_rx,
+        } = spawn_worker(plugin).unwrap();
+        let worker = Arc::new(worker);
+        start_io(&worker, stdout, stdin, writer_rx, dispatch_rx);
+        worker
+    }
+
     fn script_plugin(dir: &std::path::Path, script_body: &str) -> LoadedPlugin {
         let manifest_toml = r#"
 id = "test.worker"
@@ -714,9 +992,7 @@ entrypoint = "worker.sh"
             dir.path(),
             "#!/bin/sh\nread line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\\n'\n",
         );
-        let (worker, stdout) = spawn_worker(&plugin).unwrap();
-        let worker = Arc::new(worker);
-        start_reader(&worker, stdout);
+        let worker = spawn_and_start(&plugin);
         let result = call_worker(&worker, "test.run", json!({}), Duration::from_secs(5)).unwrap();
         assert_eq!(result, json!({"ok": true}));
         let _ = worker.child.lock().unwrap().kill();
@@ -730,9 +1006,7 @@ entrypoint = "worker.sh"
             dir.path(),
             "#!/bin/sh\nread line\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":1,\"message\":\"nope\"}}\\n'\nsleep 60\n",
         );
-        let (worker, stdout) = spawn_worker(&plugin).unwrap();
-        let worker = Arc::new(worker);
-        start_reader(&worker, stdout);
+        let worker = spawn_and_start(&plugin);
         // First call: a clean RPC refusal.
         let err = call_worker(&worker, "test.run", json!({}), Duration::from_secs(5)).unwrap_err();
         assert!(
@@ -744,6 +1018,36 @@ entrypoint = "worker.sh"
             call_worker(&worker, "test.run", json!({}), Duration::from_millis(200)).unwrap_err();
         assert!(matches!(err, CallError::Wire(_)), "{err:?}");
         let _ = worker.child.lock().unwrap().kill();
+    }
+
+    #[test]
+    fn read_capped_line_aborts_on_a_newline_less_flood() {
+        // A worker streaming bytes without a newline must not grow buf without
+        // bound: the helper errors once it crosses MAX_LINE_BYTES instead.
+        struct Endless;
+        impl std::io::Read for Endless {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                b.fill(b'x');
+                Ok(b.len())
+            }
+        }
+        let mut reader = BufReader::new(Endless);
+        let mut buf = Vec::new();
+        let err = read_capped_line(&mut reader, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(buf.len() <= MAX_LINE_BYTES + 64 * 1024);
+    }
+
+    #[test]
+    fn read_capped_line_reads_one_line_and_eof() {
+        let mut reader = BufReader::new(&b"first\nsecond"[..]);
+        let mut buf = Vec::new();
+        assert_eq!(read_capped_line(&mut reader, &mut buf).unwrap(), 6);
+        assert_eq!(&buf, b"first\n");
+        // Trailing line with no newline, then EOF (Ok(0)).
+        assert_eq!(read_capped_line(&mut reader, &mut buf).unwrap(), 6);
+        assert_eq!(&buf, b"second");
+        assert_eq!(read_capped_line(&mut reader, &mut buf).unwrap(), 0);
     }
 
     #[test]
