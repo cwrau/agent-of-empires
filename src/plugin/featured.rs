@@ -70,6 +70,17 @@ impl FeaturedIndex {
         self.featured.iter().any(|p| p.slug == slug)
     }
 
+    /// The pinned GitHub slug for a featured plugin id, if any. Auto-update
+    /// uses this to refuse a recorded source whose slug drifted from the
+    /// index: a same-user process can rewrite `source` in `plugins.lock` to
+    /// redirect a featured plugin's silent auto-update to a hostile repo.
+    pub fn slug_for_id(&self, id: &str) -> Option<&str> {
+        self.featured
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.slug.as_str())
+    }
+
     /// Validate a staged plugin fetched from `slug` against the index.
     /// Errors are security refusals: a featured slug serving a different
     /// plugin id, or a pinned release whose tree hash does not match.

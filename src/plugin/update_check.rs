@@ -97,14 +97,44 @@ pub enum AutoUpdateResult {
     Failed { error: String },
 }
 
+/// True when a featured plugin id is recorded with a source that is not its
+/// index-pinned GitHub slug. `plugins.lock` is editable by any process
+/// running as the user, so a redirected `source` would otherwise make the
+/// next silent auto-update re-clone a featured plugin from a hostile repo
+/// (`featured_validation` then returns `NotFeatured`, skipping the hash pin).
+/// Ordinary (non-featured) ids never drift.
+fn featured_source_drifted(id: &str, source: &PluginSource) -> bool {
+    let Some(pinned) = super::featured::index().slug_for_id(id) else {
+        return false;
+    };
+    match source {
+        PluginSource::GitHub { slug } => slug != pinned,
+        _ => true,
+    }
+}
+
 /// Update every plugin with an available update, silently but safely: the
 /// confirm callback always declines, so a capability-changing update is
 /// left pending instead of granted behind the user's back. The featured
-/// index still verifies inside `install::update`.
+/// index still verifies inside `install::update`, and a featured plugin whose
+/// recorded source slug drifted from the index pin is refused outright.
 pub fn auto_update_all() -> Result<Vec<(String, AutoUpdateResult)>> {
     let mut results = Vec::new();
+    let lockfile = Lockfile::load()?;
     for (id, status) in check_all()? {
         if status != UpdateStatus::Available {
+            continue;
+        }
+        if lockfile
+            .get(&id)
+            .is_some_and(|rec| featured_source_drifted(&id, &rec.source))
+        {
+            tracing::warn!(
+                target: "plugin",
+                plugin = %id,
+                "recorded source drifted from the featured index pin; refusing silent auto-update"
+            );
+            results.push((id, AutoUpdateResult::NeedsApproval));
             continue;
         }
         let outcome = super::install::update(&id, &mut |_| false);
@@ -167,6 +197,43 @@ mod tests {
             commit: commit.map(str::to_string),
             installed_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn featured_source_drift_is_detected() {
+        // Uses the real embedded featured index (plugins/featured.toml).
+        let featured_id = "agent-of-empires.github";
+        let pinned = super::super::featured::index()
+            .slug_for_id(featured_id)
+            .expect("agent-of-empires.github is featured in the embedded index");
+        // Recorded source matches the pin: no drift.
+        assert!(!featured_source_drifted(
+            featured_id,
+            &PluginSource::GitHub {
+                slug: pinned.to_string()
+            }
+        ));
+        // Redirected to a hostile slug: drift.
+        assert!(featured_source_drifted(
+            featured_id,
+            &PluginSource::GitHub {
+                slug: "evil/plugin-github".to_string()
+            }
+        ));
+        // Redirected to a local path: drift.
+        assert!(featured_source_drifted(
+            featured_id,
+            &PluginSource::Path {
+                path: "/tmp/evil".to_string()
+            }
+        ));
+        // A non-featured community id never drifts.
+        assert!(!featured_source_drifted(
+            "some.community-plugin",
+            &PluginSource::GitHub {
+                slug: "whoever/whatever".to_string()
+            }
+        ));
     }
 
     #[test]

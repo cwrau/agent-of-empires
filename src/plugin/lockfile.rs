@@ -84,12 +84,7 @@ impl Lockfile {
     }
 
     fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, toml::to_string_pretty(&self.doc)?)
-            .with_context(|| format!("writing {}", self.path.display()))?;
-        Ok(())
+        super::write_private_atomic(&self.path, &toml::to_string_pretty(&self.doc)?)
     }
 }
 

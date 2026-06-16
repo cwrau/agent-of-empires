@@ -113,18 +113,7 @@ impl GrantStore {
     }
 
     fn save(&self) -> Result<()> {
-        let raw = toml::to_string_pretty(&self.doc)?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, raw)
-            .with_context(|| format!("writing {}", self.path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+        super::write_private_atomic(&self.path, &toml::to_string_pretty(&self.doc)?)
     }
 }
 

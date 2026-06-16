@@ -95,6 +95,36 @@ pub fn plugins_dir() -> Result<PathBuf> {
     Ok(crate::session::get_app_dir()?.join("plugins"))
 }
 
+/// Atomically write `contents` to `path` with owner-only (0600) permissions.
+/// A `NamedTempFile` in the same directory (mkstemp creates it 0600 on unix)
+/// is filled and then renamed over `path`, so a crash, OOM, or `kill -9`
+/// mid-write leaves the previous file intact instead of a truncated one, and
+/// the bytes are never momentarily group/world-readable. Used by the lockfile
+/// and grant stores, both of which feed security decisions (source resolution
+/// for auto-update, the capability allowlist).
+pub(crate) fn write_private_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
+    use anyhow::Context;
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("staging write for {}", path.display()))?;
+    tmp.write_all(contents.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    tmp.as_file().sync_all().ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    tmp.persist(path)
+        .with_context(|| format!("persisting {}", path.display()))?;
+    Ok(())
+}
+
 static REGISTRY: RwLock<Option<Arc<PluginRegistry>>> = RwLock::new(None);
 
 /// The process-wide plugin registry, loaded on first use from the global
@@ -135,6 +165,22 @@ pub fn reload_registry() -> Arc<PluginRegistry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_private_atomic_replaces_and_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("plugins.lock");
+        write_private_atomic(&path, "first").unwrap();
+        // A second write fully replaces (no append/torn content).
+        write_private_atomic(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
+        }
+    }
 
     #[test]
     fn redacted_describe_hides_local_path() {
