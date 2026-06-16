@@ -261,10 +261,15 @@ fn run_info(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Interactive confirmation, honest about what capability gating is and is
-/// not. Used by install and capability-changing updates.
-fn prompt_for_capabilities(prompt: &InstallPrompt) -> bool {
-    println!(
+/// Print what is about to be granted: featured status, the capability set (or
+/// the changed set on update), any core defaults this plugin will redirect,
+/// and the no-OS-sandbox warning. Written to stderr so a scripted
+/// `--yes` install still surfaces it (the warning must not depend on the
+/// interactive question firing). The sandbox sentence comes from
+/// `sandbox::backend().isolation_summary()`, identical to the TUI and web
+/// surfaces, so a future sandbox backend updates all three at once.
+fn print_prompt_summary(prompt: &InstallPrompt) {
+    eprintln!(
         "{} {} v{} [{}]",
         if prompt.previous_capabilities.is_some() {
             "Updating"
@@ -276,14 +281,14 @@ fn prompt_for_capabilities(prompt: &InstallPrompt) -> bool {
         prompt.source.describe()
     );
     if !prompt.description.is_empty() {
-        println!("  {}", prompt.description);
+        eprintln!("  {}", prompt.description);
     }
     match prompt.featured {
         FeaturedValidation::Verified => {
-            println!("  Featured plugin: this release matches its hash validated by the AoE maintainers.");
+            eprintln!("  Featured plugin: this release matches its hash validated by the AoE maintainers.");
         }
         FeaturedValidation::UnknownVersion => {
-            println!(
+            eprintln!(
                 "  Featured plugin, but v{} has no validated hash yet; treating it as unvalidated.",
                 prompt.version
             );
@@ -291,7 +296,7 @@ fn prompt_for_capabilities(prompt: &InstallPrompt) -> bool {
         FeaturedValidation::NotFeatured => {}
     }
     if let Some(prev) = &prompt.previous_capabilities {
-        println!("\nDeclared capabilities CHANGED since you granted them:");
+        eprintln!("\nDeclared capabilities CHANGED since you granted them:");
         let prev_strs: Vec<&str> = prev.iter().map(|c| c.as_str()).collect();
         for cap in &prompt.capabilities {
             let marker = if prev_strs.contains(&cap.as_str()) {
@@ -299,29 +304,36 @@ fn prompt_for_capabilities(prompt: &InstallPrompt) -> bool {
             } else {
                 "+"
             };
-            println!("  {marker} {}", cap.as_str());
+            eprintln!("  {marker} {}", cap.as_str());
         }
     } else if prompt.capabilities.is_empty() {
-        println!("\nNo runtime capabilities requested (declarative contributions only).");
+        eprintln!("\nNo runtime capabilities requested (declarative contributions only).");
     } else {
-        println!("\nThis plugin requests:");
+        eprintln!("\nThis plugin requests:");
         for cap in &prompt.capabilities {
-            println!("  - {}", cap.as_str());
+            eprintln!("  - {}", cap.as_str());
         }
     }
     if !prompt.core_default_overrides.is_empty() {
-        println!("\nThis plugin will change the default of these core settings:");
+        eprintln!("\nThis plugin will change the default of these core settings:");
         for ov in &prompt.core_default_overrides {
-            println!("  - {ov}");
+            eprintln!("  - {ov}");
         }
     }
-    if prompt.trust == TrustLevel::Community {
-        println!(
-            "\nNote: capability grants gate this plugin's access to aoe's APIs.\n\
-             They are NOT an OS sandbox; its worker process runs with your user's\n\
-             permissions. Only install plugins you trust."
+    if !matches!(prompt.trust, TrustLevel::Builtin) {
+        eprintln!(
+            "\nNote: capability grants gate this plugin's access to aoe's APIs; \
+             they are not an OS sandbox. This plugin {}. Only install plugins you trust.",
+            crate::plugin::sandbox::backend().isolation_summary()
         );
     }
+}
+
+/// Interactive confirmation, honest about what capability gating is and is
+/// not. Used by install and capability-changing updates. `--yes` skips this
+/// (auto-accepts) but still prints the summary via [`print_prompt_summary`].
+fn prompt_for_capabilities(prompt: &InstallPrompt) -> bool {
+    print_prompt_summary(prompt);
     print!("\nProceed? [y/N] ");
     use std::io::Write;
     std::io::stdout().flush().ok();
@@ -334,7 +346,16 @@ fn prompt_for_capabilities(prompt: &InstallPrompt) -> bool {
 
 fn run_install(source: &str, yes: bool) -> Result<()> {
     let source = crate::plugin::install::parse_source(source)?;
-    let mut confirm = |prompt: &InstallPrompt| yes || prompt_for_capabilities(prompt);
+    let mut confirm = |prompt: &InstallPrompt| {
+        if yes {
+            // Auto-accept, but still surface the capabilities and no-sandbox
+            // warning so a scripted install does not grant silently.
+            print_prompt_summary(prompt);
+            true
+        } else {
+            prompt_for_capabilities(prompt)
+        }
+    };
     match crate::plugin::install::install(source, &mut confirm)? {
         InstallOutcome::Installed { id, version } => {
             println!("Installed {id} v{version} (enabled).");
@@ -369,7 +390,14 @@ fn run_set_enabled(id: &str, enabled: bool) -> Result<()> {
 }
 
 fn run_update(id: &str, yes: bool) -> Result<()> {
-    let mut confirm = |prompt: &InstallPrompt| yes || prompt_for_capabilities(prompt);
+    let mut confirm = |prompt: &InstallPrompt| {
+        if yes {
+            print_prompt_summary(prompt);
+            true
+        } else {
+            prompt_for_capabilities(prompt)
+        }
+    };
     match crate::plugin::install::update(id, &mut confirm)? {
         InstallOutcome::Updated { id, version } => println!("Updated {id} to v{version}."),
         InstallOutcome::UpToDate { id, version } => {

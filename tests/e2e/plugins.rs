@@ -147,6 +147,13 @@ default = false
         String::from_utf8_lossy(&install.stdout).contains("Installed acme.demo v1.0.0"),
         "unexpected install output"
     );
+    // --yes must NOT silence the no-OS-sandbox warning: a scripted install
+    // still surfaces it (on stderr) so capabilities are never granted blind.
+    assert!(
+        String::from_utf8_lossy(&install.stderr).contains("not an OS sandbox"),
+        "--yes install must still print the sandbox warning:\n{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
 
     let same = h.run_cli(&["plugin", "update", "acme.demo", "--yes"]);
     assert!(
