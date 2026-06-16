@@ -79,6 +79,8 @@ fn status_from_kind(kind: StatusKind) -> Status {
         StatusKind::Waiting => Status::Waiting,
         StatusKind::Idle => Status::Idle,
         StatusKind::Error => Status::Error,
+        // StatusKind is #[non_exhaustive]; an unknown future kind maps to Idle.
+        _ => Status::Idle,
     }
 }
 
@@ -136,6 +138,9 @@ fn build_snapshot() -> Arc<Snapshot> {
                         }),
                     );
                 }
+                // DetectionMode is #[non_exhaustive]; an unknown future mode
+                // contributes no detector rather than failing the snapshot.
+                _ => {}
             }
         }
     }

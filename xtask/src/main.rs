@@ -611,6 +611,63 @@ struct FeaturedReleaseEntry {
     tree_hash: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PinOutcome {
+    /// A new slug or a new version was appended.
+    Added,
+    /// The exact (slug, id, version, hash) is already pinned: no-op.
+    AlreadyPinned,
+}
+
+/// Apply a featured pin to the index in memory. This is the security-critical
+/// gate that decides what `cargo xtask feature-plugin` will write to
+/// `plugins/featured.toml` (the identity allowlist and install-time hash
+/// verification), so it is a pure function with its own tests rather than
+/// inline `fail()` calls. Refusals: a slug already pinned to a different id
+/// (id takeover), and re-pinning a released version to a different hash
+/// (tamper). A new slug, a new version under a known slug, or the identical
+/// pin again are allowed.
+fn apply_featured_pin(
+    index: &mut FeaturedIndexFile,
+    slug: &str,
+    id: &str,
+    version: &str,
+    tree_hash: &str,
+) -> Result<PinOutcome, String> {
+    if let Some(entry) = index.featured.iter_mut().find(|e| e.slug == slug) {
+        if entry.id != id {
+            return Err(format!(
+                "{slug} is already featured under id {:?} but now serves {id:?}; refusing",
+                entry.id
+            ));
+        }
+        if let Some(rel) = entry.releases.iter().find(|r| r.version == version) {
+            if rel.tree_hash == tree_hash {
+                return Ok(PinOutcome::AlreadyPinned);
+            }
+            return Err(format!(
+                "{id} v{version} is already pinned to a different hash ({}); bump the \
+                 plugin version instead of re-pinning a released one",
+                rel.tree_hash
+            ));
+        }
+        entry.releases.push(FeaturedReleaseEntry {
+            version: version.to_string(),
+            tree_hash: tree_hash.to_string(),
+        });
+    } else {
+        index.featured.push(FeaturedEntry {
+            id: id.to_string(),
+            slug: slug.to_string(),
+            releases: vec![FeaturedReleaseEntry {
+                version: version.to_string(),
+                tree_hash: tree_hash.to_string(),
+            }],
+        });
+    }
+    Ok(PinOutcome::Added)
+}
+
 fn fail(msg: impl std::fmt::Display) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1);
@@ -698,37 +755,13 @@ fn feature_plugin(args: FeaturePluginArgs) {
     let mut index: FeaturedIndexFile = toml::from_str(&existing)
         .unwrap_or_else(|e| fail(format!("{} is not valid TOML: {e}", index_path.display())));
 
-    if let Some(entry) = index.featured.iter_mut().find(|e| e.slug == slug) {
-        if entry.id != id {
-            fail(format!(
-                "{slug} is already featured under id {:?} but now serves {id:?}; refusing",
-                entry.id
-            ));
+    match apply_featured_pin(&mut index, &slug, &id, &version, &tree_hash) {
+        Err(msg) => fail(msg),
+        Ok(PinOutcome::AlreadyPinned) => {
+            println!("{id} v{version} is already featured with this hash; nothing to do.");
+            return;
         }
-        if let Some(rel) = entry.releases.iter().find(|r| r.version == version) {
-            if rel.tree_hash == tree_hash {
-                println!("{id} v{version} is already featured with this hash; nothing to do.");
-                return;
-            }
-            fail(format!(
-                "{id} v{version} is already pinned to a different hash ({}); bump the \
-                 plugin version instead of re-pinning a released one",
-                rel.tree_hash
-            ));
-        }
-        entry.releases.push(FeaturedReleaseEntry {
-            version: version.clone(),
-            tree_hash,
-        });
-    } else {
-        index.featured.push(FeaturedEntry {
-            id: id.clone(),
-            slug: slug.clone(),
-            releases: vec![FeaturedReleaseEntry {
-                version: version.clone(),
-                tree_hash,
-            }],
-        });
+        Ok(PinOutcome::Added) => {}
     }
 
     let body = toml::to_string(&index).expect("serializing featured index");
@@ -765,5 +798,43 @@ mod tests {
         assert!(!is_watch_relevant(Path::new(".git/index")));
         assert!(!is_watch_relevant(Path::new("Cargo.toml.swp")));
         assert!(!is_watch_relevant(Path::new("web/src/App.tsx")));
+    }
+}
+
+#[cfg(test)]
+mod featured_tests {
+    use super::{apply_featured_pin, FeaturedIndexFile, PinOutcome};
+
+    #[test]
+    fn pin_lifecycle_and_refusals() {
+        let mut index = FeaturedIndexFile::default();
+
+        // New slug -> appended.
+        assert_eq!(
+            apply_featured_pin(&mut index, "acme/p", "acme.p", "1.0.0", "sha256:aaaa"),
+            Ok(PinOutcome::Added)
+        );
+        // Existing slug + new version -> release appended.
+        assert_eq!(
+            apply_featured_pin(&mut index, "acme/p", "acme.p", "1.1.0", "sha256:bbbb"),
+            Ok(PinOutcome::Added)
+        );
+        // Existing slug + same version + same hash -> no-op.
+        assert_eq!(
+            apply_featured_pin(&mut index, "acme/p", "acme.p", "1.0.0", "sha256:aaaa"),
+            Ok(PinOutcome::AlreadyPinned)
+        );
+        // Existing slug + same version + DIFFERENT hash -> refused (tamper).
+        let err =
+            apply_featured_pin(&mut index, "acme/p", "acme.p", "1.0.0", "sha256:evil").unwrap_err();
+        assert!(err.contains("already pinned to a different hash"), "{err}");
+        // Existing slug + DIFFERENT id -> refused (id takeover).
+        let err =
+            apply_featured_pin(&mut index, "acme/p", "evil.p", "2.0.0", "sha256:cccc").unwrap_err();
+        assert!(err.contains("now serves"), "{err}");
+
+        // The refusals wrote nothing beyond the two legitimate releases.
+        assert_eq!(index.featured.len(), 1);
+        assert_eq!(index.featured[0].releases.len(), 2);
     }
 }

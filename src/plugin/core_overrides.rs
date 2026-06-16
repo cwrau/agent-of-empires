@@ -352,16 +352,18 @@ mod tests {
         value: toml::Value,
         priority: i32,
     ) -> ScannedPlugin {
+        // Built via Deserialize: SettingDefaultOverride is #[non_exhaustive]
+        // and cannot be constructed with a struct literal outside its crate.
+        let mut t = toml::Table::new();
+        t.insert("target".into(), toml::Value::String(target.to_string()));
+        t.insert("value".into(), value);
+        t.insert("priority".into(), toml::Value::Integer(priority as i64));
+        let ov: SettingDefaultOverride = toml::Value::Table(t).try_into().unwrap();
         ScannedPlugin {
             id: id.to_string(),
             builtin: false,
             granted,
-            overrides: vec![SettingDefaultOverride {
-                target: target.to_string(),
-                value,
-                priority,
-                reason: String::new(),
-            }],
+            overrides: vec![ov],
         }
     }
 

@@ -137,7 +137,7 @@ fn validation_collects_all_problems() {
 id = "aoe.broken"
 name = "Broken"
 version = ""
-api_version = 99
+api_version = 1
 
 [[commands]]
 path = ["review"]
@@ -155,12 +155,37 @@ method = "status.detect_batch"
 "#,
     );
     let all = messages.join("\n");
-    assert!(all.contains("api_version 99"), "{all}");
+    // Too-high api_version is its own error now (see
+    // newer_api_version_reports_version_not_unknown_variant), not collected
+    // here; this fixture targets the validate() problem list.
     assert!(all.contains("version must not be empty"), "{all}");
     assert!(all.contains("cli-top-level"), "{all}");
     assert!(all.contains("undeclared action"), "{all}");
     assert!(all.contains("pane-read"), "{all}");
     assert!(all.contains("[runtime]"), "{all}");
+}
+
+#[test]
+fn newer_api_version_reports_version_not_unknown_variant() {
+    // A v2 manifest may use a capability this v1 host does not know. The error
+    // must name the api_version, not the (legitimately newer) capability.
+    let err = PluginManifest::from_toml_str(
+        r#"
+id = "acme.future"
+name = "Future"
+version = "0.1.0"
+api_version = 2
+capabilities = ["webhooks-receive"]
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ManifestError::UnsupportedApiVersion { found: 2, max: 1 }
+        ),
+        "expected an api_version error, got {err:?}"
+    );
 }
 
 #[test]
@@ -170,6 +195,7 @@ fn fractional_number_bound_fails_to_parse() {
 id = "acme.fract"
 name = "Fractional"
 version = "0.1.0"
+api_version = 1
 
 [[settings]]
 key = "threshold"
@@ -193,10 +219,11 @@ fn traversal_and_absolute_entrypoints_are_rejected() {
 id = "aoe.evil"
 name = "Evil"
 version = "0.1.0"
+api_version = 1
 
 [[actions]]
 name = "go"
-about = "needs runtime"
+label = "Go"
 rpc_method = "go"
 
 [runtime]

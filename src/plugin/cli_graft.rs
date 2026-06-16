@@ -156,12 +156,20 @@ mod tests {
     use super::*;
 
     fn contribution(path: &[&str]) -> CliCommandContribution {
-        CliCommandContribution {
-            path: path.iter().map(|s| s.to_string()).collect(),
-            about: "test".into(),
-            args: vec![],
-            rpc_method: "test.run".into(),
-        }
+        // Built via Deserialize: CliCommandContribution is #[non_exhaustive],
+        // so it cannot be constructed with a struct literal outside its crate.
+        let mut table = toml::Table::new();
+        table.insert(
+            "path".into(),
+            toml::Value::Array(
+                path.iter()
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        table.insert("about".into(), toml::Value::String("test".into()));
+        table.insert("rpc_method".into(), toml::Value::String("test.run".into()));
+        toml::Value::Table(table).try_into().unwrap()
     }
 
     fn grafted(path: &[&str]) -> GraftedCommand {

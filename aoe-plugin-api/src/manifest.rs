@@ -10,6 +10,7 @@ use crate::{Capability, PluginId, API_VERSION};
 /// section and are dispatched to the plugin's JSON-RPC worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PluginManifest {
     pub id: PluginId,
     /// Human-readable display name.
@@ -46,6 +47,7 @@ pub struct PluginManifest {
 /// `ui.state.set` host RPC and never participates in the render path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct UiContribution {
     /// Contribution id, unique within the plugin, e.g. `attention_badge`.
     pub id: String,
@@ -62,6 +64,7 @@ pub struct UiContribution {
 /// hold one state per contribution; session slots hold one per session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum UiSlot {
     /// Short global text in the TUI status bar and the web top bar.
     StatusBarSegment,
@@ -107,6 +110,7 @@ impl UiSlot {
 /// stored under `[plugins."<id>".settings]` in config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SettingContribution {
     /// Field name within the plugin's settings table, e.g. `poll_interval_ms`.
     pub key: String,
@@ -122,6 +126,7 @@ pub struct SettingContribution {
 /// core-only because they need bespoke UI code on both surfaces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[non_exhaustive]
 pub enum SettingWidget {
     Toggle,
     Text,
@@ -141,6 +146,7 @@ pub enum SettingWidget {
 /// The user's own config value always wins over any override.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SettingDefaultOverride {
     /// Fully qualified target: another plugin's setting (`<plugin-id>.<key>`)
     /// or a core setting (`<section>.<field>`, e.g. `session.auto_archive`).
@@ -155,6 +161,7 @@ pub struct SettingDefaultOverride {
 /// dispatched to the plugin worker over JSON-RPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct CliCommandContribution {
     /// Position in the command tree: `["review"]` is top level (requires the
     /// `cli-top-level` capability), `["session", "archive"]` slots under an
@@ -170,6 +177,7 @@ pub struct CliCommandContribution {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct CliArg {
     pub name: String,
     #[serde(default)]
@@ -182,6 +190,7 @@ pub struct CliArg {
 /// canonically `plugin.<id>.<name>`, handled by the plugin worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ActionContribution {
     pub name: String,
     pub label: String,
@@ -194,6 +203,7 @@ pub struct ActionContribution {
 /// inspectable, never silent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct KeybindContribution {
     /// Name of an action declared in this manifest.
     pub action: String,
@@ -206,6 +216,7 @@ pub struct KeybindContribution {
 /// A theme file shipped with the plugin, copied into the theme search path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ThemeContribution {
     /// Path to the theme TOML, relative to the plugin root.
     pub file: String,
@@ -213,8 +224,16 @@ pub struct ThemeContribution {
 
 /// Status detection for one agent: either declarative rules evaluated
 /// in-core (Tier 0) or a batched RPC to the plugin worker (Tier 1).
-// No deny_unknown_fields here: serde cannot combine it with #[serde(flatten)].
+//
+// No deny_unknown_fields here: serde cannot combine it with #[serde(flatten)]
+// on `mode`. CAVEAT for plugin authors: because of that, a typo in a
+// `[[status_detection]]` key (e.g. `agnet` for `agent`, or `priorrity` inside
+// a rule) is SILENTLY DROPPED rather than rejected, and you then hit a
+// confusing downstream error. Verify a status_detection block with
+// `aoe plugin info <id>` after editing. Every other manifest struct uses
+// deny_unknown_fields and does fail loudly on an unknown key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StatusDetectionContribution {
     /// Agent tool name this detector applies to, e.g. `codex`.
     pub agent: String,
@@ -224,6 +243,7 @@ pub struct StatusDetectionContribution {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "mode")]
+#[non_exhaustive]
 pub enum DetectionMode {
     /// Ordered marker/regex rules evaluated in-core; no plugin code runs.
     Declarative { rules: Vec<DetectionRule> },
@@ -235,6 +255,7 @@ pub enum DetectionMode {
 /// One declarative rule; the highest-priority matching rule wins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct DetectionRule {
     pub status: StatusKind,
     #[serde(default)]
@@ -252,6 +273,7 @@ pub struct DetectionRule {
 /// Session statuses a detection rule may report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StatusKind {
     Running,
     Waiting,
@@ -262,6 +284,7 @@ pub enum StatusKind {
 /// Tier 1 worker definition: the executable the host spawns and supervises.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RuntimeContribution {
     /// Executable path relative to the plugin root.
     pub entrypoint: String,
@@ -273,6 +296,8 @@ pub struct RuntimeContribution {
 pub enum ManifestError {
     #[error("manifest is not valid TOML: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("manifest targets api_version {found} but this host supports 1..={max}; upgrade aoe")]
+    UnsupportedApiVersion { found: u64, max: u32 },
     #[error("manifest is invalid:\n{}", .0.join("\n"))]
     Invalid(Vec<String>),
 }
@@ -280,6 +305,23 @@ pub enum ManifestError {
 impl PluginManifest {
     /// Parse and validate an `aoe-plugin.toml` document.
     pub fn from_toml_str(input: &str) -> Result<Self, ManifestError> {
+        // Pre-parse api_version permissively first. A manifest targeting a
+        // newer host introduces capability/widget variants this host's strict
+        // enums do not know, so a plain `toml::from_str::<Self>` would fail
+        // with a confusing "unknown variant" error. Surfacing the version
+        // mismatch first tells the author the real problem (upgrade aoe), not
+        // that their capability name is wrong.
+        if let Some(found) = toml::from_str::<toml::Value>(input)
+            .ok()
+            .and_then(|doc| doc.get("api_version").and_then(toml::Value::as_integer))
+        {
+            if found > API_VERSION as i64 {
+                return Err(ManifestError::UnsupportedApiVersion {
+                    found: found as u64,
+                    max: API_VERSION,
+                });
+            }
+        }
         let manifest: Self = toml::from_str(input)?;
         manifest.validate()?;
         Ok(manifest)

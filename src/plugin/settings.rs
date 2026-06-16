@@ -161,6 +161,12 @@ fn widget_for(widget: &SettingWidget) -> WidgetKind {
                 .map(|value| SelectOption::new(value, value))
                 .collect(),
         },
+        // SettingWidget is #[non_exhaustive]; a future variant a newer manifest
+        // declares degrades to plain text rather than failing the whole schema.
+        _ => WidgetKind::Text {
+            multiline: false,
+            mono: false,
+        },
     }
 }
 
@@ -178,6 +184,8 @@ fn validation_for(widget: &SettingWidget) -> ValidationKind {
             options: options.clone(),
         },
         SettingWidget::Toggle | SettingWidget::Text => ValidationKind::None,
+        // Unknown future widget: no server-side value rule (#[non_exhaustive]).
+        _ => ValidationKind::None,
     }
 }
 
@@ -224,6 +232,9 @@ fn widget_default(widget: &SettingWidget) -> Value {
         SettingWidget::Text => json!(""),
         SettingWidget::Number { min, .. } => json!(min.unwrap_or(0)),
         SettingWidget::Select { options } => json!(options.first().cloned().unwrap_or_default()),
+        // Unknown future widget (#[non_exhaustive]): empty string is a safe
+        // zero value for the generic renderers.
+        _ => json!(""),
     }
 }
 

@@ -426,6 +426,23 @@ The full declared capability list (kebab-case, from
 `process-spawn`, `net-fetch`, `fs-read`, `fs-write`, `agent-reconcile`,
 `agent-hooks`, `cli-top-level`.
 
+### Capabilities not yet implemented
+
+`process-spawn`, `net-fetch`, `fs-read`, `fs-write`, `agent-reconcile`, and
+`agent-hooks` are RESERVED forward declarations. They parse in a manifest, but
+the host has no RPC for them yet, so a worker that calls one gets an
+"unknown host method" error. Declare them only when the host actually
+implements them (a later `api_version`). The implemented set today is
+`sessions.list`, `session.meta.*`, `events.publish`, `events.subscribe`, and
+the `ui.*` pushes; `pane-read` and `cli-top-level` are consumed at manifest
+validation, not as worker-initiated RPCs.
+
+When the reserved capabilities land, the prompt will spell out their reach
+(outbound network, arbitrary host file read/write, spawning host processes):
+they are far broader than the session/event capabilities, and capability
+gating is not an OS sandbox, so approving them means trusting the plugin's
+code with your user's permissions.
+
 Lifecycle: exit when stdin reaches EOF (that is how the host shuts you
 down); anything you write to stderr lands in the host log line by line. A
 crashing worker is respawned at most 3 times per process; after that the

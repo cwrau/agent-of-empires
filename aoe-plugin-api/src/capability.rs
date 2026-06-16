@@ -11,8 +11,16 @@ use serde::{Deserialize, Serialize};
 /// This gates access to host APIs for cooperative plugins; it is not OS-level
 /// process isolation. See the security model section of
 /// `docs/development/internals/plugin-system.md`.
+///
+/// `#[non_exhaustive]`: capabilities grow with `api_version`, so downstream
+/// Rust consumers must handle an unknown variant rather than break on a new
+/// one. Several variants below are RESERVED forward declarations: they parse
+/// in a manifest but the host has no RPC for them yet and returns an "unknown
+/// host method" error at call time. The "Capabilities not yet implemented"
+/// section of `docs/development/writing-plugins.md` tracks the live set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Capability {
     /// Read the session list and instance fields.
     SessionsRead,
@@ -24,17 +32,17 @@ pub enum Capability {
     EventsSubscribe,
     /// Publish events under the plugin's own `plugin.<id>.*` topics.
     EventsPublish,
-    /// Ask the host to spawn a subprocess.
+    /// RESERVED (not yet implemented): ask the host to spawn a subprocess.
     ProcessSpawn,
-    /// Outbound HTTP through the host.
+    /// RESERVED (not yet implemented): outbound HTTP through the host.
     NetFetch,
-    /// Read files through host RPCs, within granted scopes.
+    /// RESERVED (not yet implemented): read files through host RPCs.
     FsRead,
-    /// Write files through host RPCs, within granted scopes.
+    /// RESERVED (not yet implemented): write files through host RPCs.
     FsWrite,
-    /// Contribute hook/pane status reconciliation for an agent.
+    /// RESERVED (not yet implemented): hook/pane status reconciliation.
     AgentReconcile,
-    /// Contribute agent hook install/uninstall declarations.
+    /// RESERVED (not yet implemented): agent hook install/uninstall.
     AgentHooks,
     /// Place a contributed CLI command at the top level of the command tree.
     CliTopLevel,
