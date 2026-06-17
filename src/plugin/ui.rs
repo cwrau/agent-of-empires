@@ -21,6 +21,8 @@ use anyhow::{bail, Result};
 use aoe_plugin_api::UiSlot;
 use serde::{Deserialize, Serialize};
 
+use super::RwLockSafe;
+
 /// Severity tints shared by every slot payload; both surfaces map them to
 /// theme colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -244,7 +246,7 @@ pub fn revision() -> u64 {
 }
 
 fn with_store<T>(f: impl FnOnce(&mut UiStore) -> T) -> T {
-    let mut guard = STORE.write().expect("ui store lock");
+    let mut guard = STORE.write_safe();
     let store = guard.get_or_insert_with(UiStore::default);
     // Sweep expired entries on every write so TTL actually caps memory and
     // read-side scans in a long-lived daemon; reads only filter.
@@ -256,7 +258,7 @@ fn with_store<T>(f: impl FnOnce(&mut UiStore) -> T) -> T {
 }
 
 fn read_store<T>(f: impl FnOnce(&UiStore) -> T) -> T {
-    let guard = STORE.read().expect("ui store lock");
+    let guard = STORE.read_safe();
     match guard.as_ref() {
         Some(store) => f(store),
         None => f(&UiStore::default()),

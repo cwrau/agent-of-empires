@@ -95,13 +95,15 @@ pub fn plugins_dir() -> Result<PathBuf> {
     Ok(crate::session::get_app_dir()?.join("plugins"))
 }
 
-/// Atomically write `contents` to `path` with owner-only (0600) permissions.
-/// A `NamedTempFile` in the same directory (mkstemp creates it 0600 on unix)
-/// is filled and then renamed over `path`, so a crash, OOM, or `kill -9`
-/// mid-write leaves the previous file intact instead of a truncated one, and
-/// the bytes are never momentarily group/world-readable. Used by the lockfile
-/// and grant stores, both of which feed security decisions (source resolution
-/// for auto-update, the capability allowlist).
+/// Atomically and durably write `contents` to `path` with owner-only (0600)
+/// permissions. A `NamedTempFile` in the same directory (mkstemp creates it
+/// 0600 on unix) is filled, fsynced, renamed over `path`, and finally the
+/// parent directory is fsynced so the rename's directory entry survives an OS
+/// crash. So a crash, OOM, `kill -9`, or power loss leaves either the previous
+/// file or the complete new one, never a truncated or missing file, and the
+/// bytes are never momentarily group/world-readable. Used by the lockfile and
+/// grant stores, both of which feed security decisions (source resolution for
+/// auto-update, the capability allowlist).
 pub(crate) fn write_private_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
@@ -113,16 +115,55 @@ pub(crate) fn write_private_atomic(path: &std::path::Path, contents: &str) -> Re
         .with_context(|| format!("staging write for {}", path.display()))?;
     tmp.write_all(contents.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
-    tmp.as_file().sync_all().ok();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         tmp.as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
+    // Flush the data before the rename, and propagate the error: a swallowed
+    // sync_all (ENOSPC/EIO/EROFS) would leave a non-durable temp.
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("flushing {}", path.display()))?;
     tmp.persist(path)
         .with_context(|| format!("persisting {}", path.display()))?;
+    // fsync the directory so the rename itself is durable across an OS crash;
+    // best-effort (some platforms reject opening a dir for sync).
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
+}
+
+/// Lock recovery for the plugin subsystem's process-wide state. Plugin code
+/// is the untrusted surface (manifest TOML, detection regex, settings JSON all
+/// flow through these globals), so a panic while one of these locks is held
+/// must not poison it and take the daemon (or a TUI redraw / tokio task) down
+/// on the next access. Recovering the guard via `into_inner` is correct here:
+/// the held data is rebuildable cache, not partial-mutation-sensitive state.
+pub(crate) trait LockSafe<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockSafe<T> for std::sync::Mutex<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+pub(crate) trait RwLockSafe<T> {
+    fn read_safe(&self) -> std::sync::RwLockReadGuard<'_, T>;
+    fn write_safe(&self) -> std::sync::RwLockWriteGuard<'_, T>;
+}
+
+impl<T> RwLockSafe<T> for RwLock<T> {
+    fn read_safe(&self) -> std::sync::RwLockReadGuard<'_, T> {
+        self.read().unwrap_or_else(|e| e.into_inner())
+    }
+    fn write_safe(&self) -> std::sync::RwLockWriteGuard<'_, T> {
+        self.write().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 static REGISTRY: RwLock<Option<Arc<PluginRegistry>>> = RwLock::new(None);
@@ -131,10 +172,10 @@ static REGISTRY: RwLock<Option<Arc<PluginRegistry>>> = RwLock::new(None);
 /// config. Mutating surfaces (CLI install/enable, settings toggles, web
 /// endpoints) call [`reload_registry`] after persisting their change.
 pub fn registry() -> Arc<PluginRegistry> {
-    if let Some(reg) = REGISTRY.read().expect("plugin registry lock").as_ref() {
+    if let Some(reg) = REGISTRY.read_safe().as_ref() {
         return reg.clone();
     }
-    let mut slot = REGISTRY.write().expect("plugin registry lock");
+    let mut slot = REGISTRY.write_safe();
     if let Some(reg) = slot.as_ref() {
         return reg.clone();
     }
@@ -152,7 +193,7 @@ pub fn reload_registry() -> Arc<PluginRegistry> {
     core_overrides::invalidate();
     let config = crate::session::Config::load_or_warn();
     let reg = Arc::new(PluginRegistry::load(&config));
-    *REGISTRY.write().expect("plugin registry lock") = Some(reg.clone());
+    *REGISTRY.write_safe() = Some(reg.clone());
     status::invalidate_cache();
     host::host().reset();
     // UI state of plugins that are no longer active must vanish with them.

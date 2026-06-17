@@ -72,21 +72,8 @@ const MAX_TOPIC_BYTES: usize = 256;
 /// plugin that fails once a day is not permanently disabled.
 const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
 
-/// Lock a `Mutex` recovering from poisoning. Plugin code is the untrusted
-/// surface here: a panic while a host lock is held (a malformed-JSON handler,
-/// a `serde_json::from_value` on hostile input) would otherwise poison the
-/// lock and crash the whole daemon on the next `expect`. The host's
-/// invariants do not depend on partial-mutation safety, so reusing the data
-/// after a panic is correct and strictly better than tearing the daemon down.
-trait LockExt<T> {
-    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T>;
-}
-
-impl<T> LockExt<T> for Mutex<T> {
-    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
+// Non-poisoning lock recovery is shared crate-wide; see `super::LockSafe`.
+use super::LockSafe;
 
 static HOST: OnceLock<PluginHost> = OnceLock::new();
 
@@ -698,7 +685,19 @@ fn handle_host_call(worker: &Arc<Worker>, method: &str, params: Value) -> Result
         "sessions.list" => {
             let storage = crate::session::Storage::new_unwatched("")?;
             let instances = storage.load()?;
-            Ok(serde_json::to_value(&instances)?)
+            let mut value = serde_json::to_value(&instances)?;
+            // plugin_meta is a per-plugin namespace; a sessions-read grant must
+            // not expose peer plugins' private session metadata. Scope each
+            // instance's plugin_meta to the calling worker (session.meta.get
+            // applies the same scoping for single-session reads).
+            if let Some(arr) = value.as_array_mut() {
+                for inst in arr {
+                    if let Some(meta) = inst.get_mut("plugin_meta").and_then(Value::as_object_mut) {
+                        meta.retain(|k, _| k == &worker.plugin_id);
+                    }
+                }
+            }
+            Ok(value)
         }
         "session.meta.get" => {
             let session_id = required_str(&params, "session_id")?;

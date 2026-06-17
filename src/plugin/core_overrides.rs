@@ -19,6 +19,7 @@ use aoe_plugin_api::{PluginManifest, SettingDefaultOverride};
 
 use super::grants::{manifest_hash, GrantStatus, GrantStore};
 use super::registry::BUILTINS;
+use super::RwLockSafe;
 
 /// One discovered plugin reduced to what override application needs.
 struct ScannedPlugin {
@@ -35,14 +36,14 @@ static SCAN: RwLock<Option<Arc<Vec<ScannedPlugin>>>> = RwLock::new(None);
 /// Drop the manifest scan; the next config load rescans. Called by
 /// `reload_registry` after install/uninstall/enable/update.
 pub fn invalidate() {
-    *SCAN.write().expect("core override scan lock") = None;
+    *SCAN.write_safe() = None;
 }
 
 fn scanned() -> Arc<Vec<ScannedPlugin>> {
-    if let Some(scan) = SCAN.read().expect("core override scan lock").as_ref() {
+    if let Some(scan) = SCAN.read_safe().as_ref() {
         return scan.clone();
     }
-    let mut slot = SCAN.write().expect("core override scan lock");
+    let mut slot = SCAN.write_safe();
     if let Some(scan) = slot.as_ref() {
         return scan.clone();
     }
@@ -167,7 +168,7 @@ pub fn declared_core_overrides(manifest: &PluginManifest) -> Vec<String> {
 pub fn apply_to_table(table: &mut toml::Table) {
     let scan = scanned();
     let applied = apply_with(table, &scan);
-    *APPLIED.write().expect("applied overrides lock") = Some(applied);
+    *APPLIED.write_safe() = Some(applied);
 }
 
 fn enabled_in(table: &toml::Table, plugin: &ScannedPlugin) -> bool {
@@ -277,7 +278,7 @@ fn apply_with(
 /// if it was just disabled the field genuinely falls back to the built-in
 /// default, which is the point.
 pub fn strip_from_table(table: &mut toml::Table) {
-    let applied = APPLIED.read().expect("applied overrides lock");
+    let applied = APPLIED.read_safe();
     if let Some(applied) = applied.as_ref() {
         strip_with(table, applied);
     }

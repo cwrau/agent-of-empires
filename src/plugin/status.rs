@@ -22,6 +22,7 @@ use aoe_plugin_api::{DetectionMode, DetectionRule, StatusKind};
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
+use super::{LockSafe, RwLockSafe};
 use crate::session::Status;
 
 /// Pane text beyond this is truncated before entering a batch.
@@ -65,11 +66,11 @@ static SNAPSHOT: RwLock<Option<Arc<Snapshot>>> = RwLock::new(None);
 /// Drop the compiled snapshot; the next `detect` rebuilds from the current
 /// registry. Called by `super::reload_registry`.
 pub fn invalidate_cache() {
-    *SNAPSHOT.write().expect("status snapshot lock") = None;
+    *SNAPSHOT.write_safe() = None;
     // A disable/enable cycle also resets per-session cached results so a
     // re-enabled plugin starts clean.
     if let Some(batcher) = BATCHER.get() {
-        batcher.cache.lock().expect("status cache lock").clear();
+        batcher.cache.lock_safe().clear();
     }
 }
 
@@ -148,11 +149,11 @@ fn build_snapshot() -> Arc<Snapshot> {
 }
 
 fn snapshot() -> Arc<Snapshot> {
-    if let Some(snap) = SNAPSHOT.read().expect("status snapshot lock").as_ref() {
+    if let Some(snap) = SNAPSHOT.read_safe().as_ref() {
         return snap.clone();
     }
     let snap = build_snapshot();
-    *SNAPSHOT.write().expect("status snapshot lock") = Some(snap.clone());
+    *SNAPSHOT.write_safe() = Some(snap.clone());
     snap
 }
 
@@ -254,13 +255,13 @@ fn truncate_snapshot(text: &str) -> String {
 fn detect_rpc(rpc: &RpcAgent, session: &str, tool: &str, clean: &str) -> Option<Status> {
     let b = batcher();
     let key = (rpc.plugin_id.clone(), session.to_string());
-    if let Some((status, at)) = b.cache.lock().expect("status cache lock").get(&key) {
+    if let Some((status, at)) = b.cache.lock_safe().get(&key) {
         if at.elapsed() < CACHE_FRESH {
             return Some(*status);
         }
     }
     {
-        let mut pending = b.pending.lock().expect("status pending lock");
+        let mut pending = b.pending.lock_safe();
         let entries = pending.entry(rpc.plugin_id.clone()).or_default();
         entries.retain(|(s, _, _)| s != session);
         entries.push((
@@ -284,7 +285,7 @@ fn detect_rpc(rpc: &RpcAgent, session: &str, tool: &str, clean: &str) -> Option<
 /// refreshed cache.
 fn flush(rpc: &RpcAgent, b: &Batcher) {
     {
-        let mut last = b.last_flush.lock().expect("status flush lock");
+        let mut last = b.last_flush.lock_safe();
         let stamp = last
             .entry(rpc.plugin_id.clone())
             .or_insert_with(|| Instant::now() - CACHE_FRESH - Duration::from_millis(1));
@@ -294,7 +295,7 @@ fn flush(rpc: &RpcAgent, b: &Batcher) {
         *stamp = Instant::now();
     }
     let snapshots: Vec<PendingSnapshot> = {
-        let mut pending = b.pending.lock().expect("status pending lock");
+        let mut pending = b.pending.lock_safe();
         pending.remove(&rpc.plugin_id).unwrap_or_default()
     };
     if snapshots.is_empty() {
@@ -313,7 +314,7 @@ fn flush(rpc: &RpcAgent, b: &Batcher) {
     match super::host::host().call_with_timeout(&rpc.plugin_id, &rpc.method, params, BATCH_TIMEOUT)
     {
         Ok(result) => {
-            let mut cache = b.cache.lock().expect("status cache lock");
+            let mut cache = b.cache.lock_safe();
             let now = Instant::now();
             for item in result
                 .get("results")
