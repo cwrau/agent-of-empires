@@ -305,6 +305,39 @@ an 800 ms deadline, and results are cached for about a second; a slow or
 crashed worker answers from cache while the supervisor's respawn budget
 decides its fate.
 
+## Event handlers
+
+A plugin can bind a bus topic to a worker RPC method declaratively, so the
+host subscribes on its behalf and calls the method for each matching event.
+This is the no-boilerplate alternative to running an `events.subscribe` loop
+in the worker: you react to lifecycle facts without writing a receive loop.
+
+```toml
+capabilities = ["events-subscribe"]
+
+[[event_handlers]]
+on = "session.created"
+rpc_method = "on_session"
+
+[[event_handlers]]
+on = "plugin.acme.*"
+rpc_method = "on_plugin_event"
+
+[runtime]
+entrypoint = "worker.mjs"
+```
+
+`on` is a topic pattern (exact, or a trailing-`*` prefix like
+`plugin.acme.*`). For each matching event the host calls `rpc_method` as a
+normal host-to-worker request with params `{ topic, payload, seq }`; answer
+it like any other contributed method. Event handlers need the
+`events-subscribe` capability and a `[runtime]` worker.
+
+Handlers fire only on events published after the plugin's handler thread
+starts (on load or after a reload); there is no replay or resume cursor, so
+use `events.subscribe { after_seq }` instead if you need to catch up on
+events missed while disabled. Events are delivered sequentially per plugin.
+
 ## UI extension points
 
 Plugins never render. The manifest declares contributions against fixed

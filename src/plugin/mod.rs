@@ -182,6 +182,7 @@ pub fn registry() -> Arc<PluginRegistry> {
     let config = crate::session::Config::load_or_warn();
     let reg = Arc::new(PluginRegistry::load(&config));
     *slot = Some(reg.clone());
+    host::start_event_handlers(&reg);
     reg
 }
 
@@ -196,6 +197,7 @@ pub fn reload_registry() -> Arc<PluginRegistry> {
     *REGISTRY.write_safe() = Some(reg.clone());
     status::invalidate_cache();
     host::host().reset();
+    host::start_event_handlers(&reg);
     // UI state of plugins that are no longer active must vanish with them.
     let active: std::collections::HashSet<String> =
         reg.active().map(|p| p.id().to_string()).collect();

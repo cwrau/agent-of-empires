@@ -29,7 +29,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use aoe_plugin_api::Capability;
+use aoe_plugin_api::{Capability, EventHandlerContribution};
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
@@ -927,6 +927,89 @@ fn notify_event(worker: &Worker, event: &crate::events::BusEvent) {
     write_line(worker, &line);
 }
 
+/// Monotonic generation for declarative event-handler threads. Each call to
+/// [`start_event_handlers`] bumps it; every handler thread captures the value
+/// at spawn and exits once it no longer matches, retiring the previous wave on
+/// a registry reload.
+static EVENT_HANDLER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// (Re)start the declarative event-handler threads. For each active plugin
+/// declaring `event_handlers`, spawns one thread that subscribes to the bus
+/// and, for every matching event, calls the bound `rpc_method` on the plugin's
+/// worker (spawning it on demand). The host subscribes on the plugin's behalf,
+/// so a plugin reacts to lifecycle facts (`session.created`, `status.changed`,
+/// `plugin.<id>.*`) without running its own `events.subscribe` loop.
+///
+/// Cancellation is generation based: this bumps a global counter and each
+/// thread exits when the counter moves past the value it captured at spawn. A
+/// thread only re-checks the generation when an event arrives (or it lags), so
+/// a handler for a now-disabled plugin lives until the next bus event, then
+/// exits. The bus carries session and status facts in normal use, so this is
+/// bounded; a fully quiet bus is the only case a stale thread parks, holding
+/// nothing but a broadcast receiver.
+///
+/// Handlers fire only on events published after the thread subscribes; unlike
+/// `events.subscribe`, there is no replay or resume cursor. Events are
+/// dispatched sequentially per plugin, so a slow handler can lag the receiver
+/// during a burst (those events are then dropped, not replayed).
+pub fn start_event_handlers(registry: &super::PluginRegistry) {
+    let generation = EVENT_HANDLER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let bus = match crate::events::global() {
+        Ok(bus) => bus.clone(),
+        Err(e) => {
+            warn!(target: "plugin", "event handlers disabled, bus unavailable: {e:#}");
+            return;
+        }
+    };
+    for plugin in registry.active() {
+        if plugin.manifest.event_handlers.is_empty() {
+            continue;
+        }
+        let id = plugin.id().to_string();
+        let handlers = plugin.manifest.event_handlers.clone();
+        let bus = bus.clone();
+        spawn_named(&format!("plugin-{id}-eventhandlers"), move || {
+            let mut rx = bus.subscribe();
+            loop {
+                match rx.blocking_recv() {
+                    Ok(event) => {
+                        if EVENT_HANDLER_GENERATION.load(Ordering::SeqCst) != generation {
+                            return;
+                        }
+                        for handler in matched_handlers(&handlers, &event.topic) {
+                            let params = json!({
+                                "topic": event.topic,
+                                "payload": event.payload,
+                                "seq": event.seq,
+                            });
+                            if let Err(e) = host().call(&id, &handler.rpc_method, params) {
+                                warn!(target: "plugin", "event handler {id} {} failed: {e:#}", handler.rpc_method);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if EVENT_HANDLER_GENERATION.load(Ordering::SeqCst) != generation {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+}
+
+/// The handlers whose topic pattern matches `topic`, in declaration order.
+fn matched_handlers<'a>(
+    handlers: &'a [EventHandlerContribution],
+    topic: &str,
+) -> Vec<&'a EventHandlerContribution> {
+    handlers
+        .iter()
+        .filter(|h| crate::events::topic_matches(&h.on, topic))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,6 +1124,45 @@ entrypoint = "worker.sh"
         assert_eq!(read_capped_line(&mut reader, &mut buf).unwrap(), 6);
         assert_eq!(&buf, b"second");
         assert_eq!(read_capped_line(&mut reader, &mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn matched_handlers_selects_exact_and_wildcard_topics() {
+        // Built via manifest parse: EventHandlerContribution is non_exhaustive,
+        // so it cannot be struct-literal constructed outside its crate.
+        let manifest = PluginManifest::from_toml_str(
+            r#"
+id = "acme.watcher"
+name = "Watcher"
+version = "0.1.0"
+api_version = 1
+capabilities = ["events-subscribe"]
+
+[[event_handlers]]
+on = "session.created"
+rpc_method = "on_created"
+
+[[event_handlers]]
+on = "plugin.acme.*"
+rpc_method = "on_plugin"
+
+[runtime]
+entrypoint = "worker"
+"#,
+        )
+        .unwrap();
+        let handlers = &manifest.event_handlers;
+        let methods = |topic: &str| {
+            matched_handlers(handlers, topic)
+                .into_iter()
+                .map(|h| h.rpc_method.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(methods("session.created"), ["on_created"]);
+        assert_eq!(methods("plugin.acme.tick"), ["on_plugin"]);
+        assert!(methods("status.changed").is_empty());
+        // An exact pattern does not match a longer topic.
+        assert!(methods("session.created.extra").is_empty());
     }
 
     #[test]

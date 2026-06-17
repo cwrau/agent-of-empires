@@ -38,7 +38,25 @@ pub struct PluginManifest {
     pub status_detection: Vec<StatusDetectionContribution>,
     #[serde(default)]
     pub ui: Vec<UiContribution>,
+    #[serde(default)]
+    pub event_handlers: Vec<EventHandlerContribution>,
     pub runtime: Option<RuntimeContribution>,
+}
+
+/// A declarative binding from a bus topic to a worker RPC method. The host
+/// subscribes on the plugin's behalf and calls `rpc_method` for each matching
+/// event, so a plugin reacts to lifecycle facts (`session.created`,
+/// `status.changed`, `plugin.<id>.*`) without running its own
+/// `events.subscribe` loop. Requires the `events-subscribe` capability and a
+/// `[runtime]` worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct EventHandlerContribution {
+    /// Bus topic pattern, exact or trailing-`*` prefix (`plugin.acme.*`).
+    pub on: String,
+    /// JSON-RPC method invoked on the worker with `{ topic, payload, seq }`.
+    pub rpc_method: String,
 }
 
 /// One typed contribution to a fixed UI extension point. The host renders
@@ -470,14 +488,30 @@ impl PluginManifest {
         let needs_runtime = !self.commands.is_empty()
             || !self.actions.is_empty()
             || !self.ui.is_empty()
+            || !self.event_handlers.is_empty()
             || self
                 .status_detection
                 .iter()
                 .any(|d| matches!(d.mode, DetectionMode::Rpc { .. }));
         check(
             !needs_runtime || self.runtime.is_some(),
-            "commands, actions, ui contributions, and rpc status detection require a [runtime] section"
+            "commands, actions, ui contributions, event handlers, and rpc status detection require a [runtime] section"
                 .into(),
+        );
+
+        for handler in &self.event_handlers {
+            check(
+                !handler.on.is_empty() && !handler.rpc_method.is_empty(),
+                format!(
+                    "event handler {:?} -> {:?} needs a non-empty topic and rpc_method",
+                    handler.on, handler.rpc_method
+                ),
+            );
+        }
+        check(
+            self.event_handlers.is_empty()
+                || self.capabilities.contains(&Capability::EventsSubscribe),
+            "event_handlers observe the bus and require the events-subscribe capability".into(),
         );
 
         if let Some(runtime) = &self.runtime {

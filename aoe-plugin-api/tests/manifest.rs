@@ -332,6 +332,83 @@ entrypoint = "worker"
 }
 
 #[test]
+fn event_handlers_parse_and_round_trip() {
+    let manifest = PluginManifest::from_toml_str(
+        r#"
+id = "acme.watcher"
+name = "Watcher"
+version = "0.1.0"
+api_version = 1
+capabilities = ["events-subscribe"]
+
+[[event_handlers]]
+on = "session.created"
+rpc_method = "on_session"
+
+[[event_handlers]]
+on = "plugin.acme.*"
+rpc_method = "on_plugin"
+
+[runtime]
+entrypoint = "worker"
+"#,
+    )
+    .expect("event-handler manifest must parse");
+    assert_eq!(manifest.event_handlers.len(), 2);
+    assert_eq!(manifest.event_handlers[0].on, "session.created");
+    assert_eq!(manifest.event_handlers[1].rpc_method, "on_plugin");
+
+    let serialized = toml::to_string(&manifest).expect("must serialize");
+    let reparsed = PluginManifest::from_toml_str(&serialized).expect("must reparse");
+    assert_eq!(
+        reparsed.event_handlers[0].rpc_method,
+        manifest.event_handlers[0].rpc_method
+    );
+}
+
+#[test]
+fn event_handlers_require_runtime_and_capability() {
+    // No [runtime] and no events-subscribe capability: both problems collected.
+    let all = invalid_messages(
+        r#"
+id = "acme.watcher"
+name = "Watcher"
+version = "0.1.0"
+api_version = 1
+
+[[event_handlers]]
+on = "session.created"
+rpc_method = "on_session"
+"#,
+    )
+    .join("\n");
+    assert!(all.contains("[runtime]"), "{all}");
+    assert!(all.contains("events-subscribe"), "{all}");
+}
+
+#[test]
+fn event_handler_empty_fields_are_rejected() {
+    let all = invalid_messages(
+        r#"
+id = "acme.watcher"
+name = "Watcher"
+version = "0.1.0"
+api_version = 1
+capabilities = ["events-subscribe"]
+
+[[event_handlers]]
+on = ""
+rpc_method = ""
+
+[runtime]
+entrypoint = "worker"
+"#,
+    )
+    .join("\n");
+    assert!(all.contains("non-empty topic and rpc_method"), "{all}");
+}
+
+#[test]
 fn unknown_manifest_fields_are_rejected() {
     let err = PluginManifest::from_toml_str(
         r#"
