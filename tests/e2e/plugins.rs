@@ -261,7 +261,7 @@ version = "1.0.0"
 api_version = 1
 
 [[setting_defaults]]
-target = "session.yolo_mode_default"
+target = "session.strict_hotkeys"
 value = true
 priority = 40
 reason = "fixture flips a core default"
@@ -280,7 +280,7 @@ reason = "fixture flips a core default"
         String::from_utf8_lossy(&install.stderr)
     );
 
-    let explain = h.run_cli(&["settings", "explain", "session.yolo_mode_default"]);
+    let explain = h.run_cli(&["settings", "explain", "session.strict_hotkeys"]);
     assert!(
         explain.status.success(),
         "explain failed: {}",
@@ -298,7 +298,7 @@ reason = "fixture flips a core default"
 
     // The override stops applying the moment the plugin is disabled.
     h.run_cli(&["plugin", "disable", "acme.coreover"]);
-    let explain = h.run_cli(&["settings", "explain", "session.yolo_mode_default"]);
+    let explain = h.run_cli(&["settings", "explain", "session.strict_hotkeys"]);
     let stdout = String::from_utf8_lossy(&explain.stdout);
     assert!(
         stdout.contains("resolved from: built-in default"),

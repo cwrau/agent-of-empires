@@ -271,12 +271,7 @@ fn detect_rpc(rpc: &RpcAgent, session: &str, tool: &str, clean: &str) -> Option<
         ));
     }
     flush(rpc, b);
-    let cached = b
-        .cache
-        .lock()
-        .expect("status cache lock")
-        .get(&key)
-        .map(|(s, _)| *s);
+    let cached = b.cache.lock_safe().get(&key).map(|(s, _)| *s);
     cached
 }
 

@@ -404,7 +404,12 @@ pub fn update(
     let prior_grant = grants.record(plugin_id).cloned();
     let prior_lock = lockfile.get(plugin_id).cloned();
     let dest = super::plugins_dir()?.join(plugin_id);
-    let backup = dest.with_extension("updating");
+    // The backup name must never collide with another plugin's install dir.
+    // `with_extension("updating")` would strip the last id segment (every id is
+    // dotted), so updating `acme.demo` backed up to `acme.updating` and the
+    // remove_dir_all below could delete an unrelated installed `acme.updating`.
+    // An underscore is invalid in a plugin id, so this name can never alias one.
+    let backup = dest.with_file_name(format!("{plugin_id}_updating"));
     if backup.exists() {
         std::fs::remove_dir_all(&backup)?;
     }

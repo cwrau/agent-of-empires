@@ -158,15 +158,22 @@ impl EventBus {
                 tracing::warn!(target: "events", topic, error = %e, "retention prune failed; rows kept");
             }
             self.next_seq.store(seq + 1, Ordering::SeqCst);
+            // Broadcast while still holding the connection lock so live
+            // delivery order matches seq-allocation order. Sending after the
+            // lock released would let two concurrent publishers race on send,
+            // delivering a higher seq first; a caught-up subscriber that drops
+            // `seq <= last_seq` would then lose the lower-seq event from the
+            // live stream (replay only fires on lag/cold-subscribe). The
+            // broadcast send is non-blocking, so holding the lock is cheap.
+            let event = Arc::new(BusEvent {
+                seq,
+                topic: topic.to_string(),
+                payload,
+                published_at,
+            });
+            // Send error just means no live subscribers; durability already holds.
+            let _ = self.tx.send(event);
         }
-        let event = Arc::new(BusEvent {
-            seq,
-            topic: topic.to_string(),
-            payload,
-            published_at,
-        });
-        // Send error just means no live subscribers; durability already holds.
-        let _ = self.tx.send(event);
         Ok(seq)
     }
 
