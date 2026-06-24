@@ -19,6 +19,7 @@ import { SchemaSection } from "./settings/SchemaSection";
 import { SelectField } from "./settings/FormFields";
 import { DiffSettings } from "./settings/DiffSettings";
 import { TelemetrySettings } from "./settings/TelemetrySettings";
+import { PluginsSettings } from "./settings/PluginsSettings";
 import { SettingsHeader } from "./settings/SettingsHeader";
 import { ProfilesSection } from "./profiles/ProfilesSection";
 import type { SettingsSearchHit } from "./settings/settingsSearchIndex";
@@ -40,7 +41,8 @@ export type TabId =
   | "devices"
   | "structured-view"
   | "mcp"
-  | "logging";
+  | "logging"
+  | "plugins";
 
 type SidebarItem = { kind: "tab"; id: TabId; label: string; icon?: ReactNode } | { kind: "divider"; label: string };
 
@@ -102,6 +104,7 @@ export function buildSidebar(): SidebarItem[] {
     { kind: "tab", id: "updates", label: "Updates" },
     { kind: "tab", id: "telemetry", label: "Telemetry" },
     { kind: "tab", id: "logging", label: "Logging" },
+    { kind: "tab", id: "plugins", label: "Plugins" },
   ];
 }
 
@@ -138,6 +141,7 @@ const ALL_TAB_IDS = new Set<TabId>([
   "structured-view",
   "mcp",
   "logging",
+  "plugins",
 ]);
 
 function isTabId(value: unknown): value is TabId {
@@ -388,6 +392,7 @@ export function SettingsView({
       activeTab !== "devices" &&
       activeTab !== "structured-view" &&
       activeTab !== "mcp" &&
+      activeTab !== "plugins" &&
       activeTab !== "telemetry"
     ) {
       return <div className="text-sm text-text-dim">Loading settings...</div>;
@@ -538,6 +543,9 @@ export function SettingsView({
             advancedSubtitle="Sink and rotation; some fields require restarting aoe to take effect."
           />
         );
+
+      case "plugins":
+        return <PluginsSettings />;
 
       case "notifications":
         return (

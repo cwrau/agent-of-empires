@@ -18,6 +18,7 @@ use super::list::ListArgs;
 use super::log_level::LogLevelArgs;
 use super::logs::LogsArgs;
 use super::mcp::McpCommands;
+use super::plugin::PluginCommands;
 use super::profile::ProfileCommands;
 use super::project::ProjectCommands;
 use super::remove::RemoveArgs;
@@ -124,6 +125,12 @@ pub enum Commands {
     Group {
         #[command(subcommand)]
         command: GroupCommands,
+    },
+
+    /// Manage plugins (list, info, enable, disable)
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
     },
 
     /// Manage profiles (separate workspaces)
@@ -238,6 +245,7 @@ pub const CLI_COMMAND_NAMES: &[&str] = &[
     "killall",
     "session",
     "group",
+    "plugin",
     "profile",
     "project",
     "worktree",
@@ -281,6 +289,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Stop { .. } => return None,
         Commands::Session { .. } => "session",
         Commands::Group { .. } => "group",
+        Commands::Plugin { .. } => "plugin",
         Commands::Profile { .. } => "profile",
         Commands::Project { .. } => "project",
         Commands::Worktree { .. } => "worktree",

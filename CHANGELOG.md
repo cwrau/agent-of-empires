@@ -165,6 +165,7 @@ The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 - [@plainlystated](https://github.com/plainlystated) made their first contribution in [#2182](https://github.com/agent-of-empires/agent-of-empires/pull/2182)
 
 **Full Changelog**: https://github.com/agent-of-empires/agent-of-empires/compare/v1.11.0...v1.11.1
+
 ## [1.11.0](https://github.com/agent-of-empires/agent-of-empires/releases/tag/v1.11.0) - 2026-06-10
 
 
