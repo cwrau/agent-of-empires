@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::collections::HashSet;
 
-use crate::session::{GroupTree, StartOutcome, Storage};
+use crate::session::{GroupTree, Instance, SessionSignal, StartOutcome, Storage};
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
@@ -70,6 +70,11 @@ pub enum SessionCommands {
 
     /// Unarchive a session (restores it to its tier in the Attention sort)
     Unarchive(SessionIdArgs),
+
+    /// Set or clear a session's status signal (a colored sidebar dot). An
+    /// agent can signal its own state with no session id: it defaults to the
+    /// session owning the current tmux pane. See #2383.
+    Signal(SignalArgs),
 }
 
 #[derive(Args)]
@@ -225,6 +230,17 @@ pub struct SetBaseArgs {
     pub clear: bool,
 }
 
+#[derive(Args)]
+pub struct SignalArgs {
+    /// Signal to set: `blocked`, `working`, or `done` (input aliases `red`,
+    /// `amber`, `green`), or `clear` / `none` to remove it.
+    pub state: String,
+    /// Session ID or title. Defaults to the session owning the current tmux
+    /// pane, so a running agent can self-signal with `aoe session signal
+    /// working`.
+    pub session: Option<String>,
+}
+
 #[derive(Serialize)]
 struct SessionDetails {
     id: String,
@@ -259,6 +275,7 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Unfavorite(args) => unfavorite_session(profile, args).await,
         SessionCommands::Archive(args) => archive_session(profile, args).await,
         SessionCommands::Unarchive(args) => unarchive_session(profile, args).await,
+        SessionCommands::Signal(args) => signal_session(profile, args).await,
     }
 }
 
@@ -1221,51 +1238,124 @@ async fn set_worktree_name(profile: &str, args: SetWorktreeNameArgs) -> Result<(
     Ok(())
 }
 
-async fn current_session(args: CurrentArgs) -> Result<()> {
-    // Auto-detect profile and session from tmux
-    let current_session = std::env::var("TMUX_PANE")
+/// Resolve the profile and instance of the aoe session owning the current
+/// tmux pane, scanning every profile. Returns `Ok(None)` when not inside a
+/// tmux pane at all, and an error only when in tmux but no aoe session
+/// matches, so callers can distinguish "not in tmux" from "wrong pane".
+fn current_tmux_session() -> Result<Option<(String, Instance)>> {
+    let session_name = match std::env::var("TMUX_PANE")
         .ok()
-        .and_then(|_| crate::tmux::get_current_session_name());
+        .and_then(|_| crate::tmux::get_current_session_name())
+    {
+        Some(name) => name,
+        None => return Ok(None),
+    };
 
-    let session_name = current_session.ok_or_else(|| anyhow::anyhow!("Not in a tmux session"))?;
-
-    // Search all profiles for this session
     let profiles = crate::session::list_profiles()?;
-
     for profile_name in &profiles {
         if let Ok(storage) = Storage::new_unwatched(profile_name) {
             if let Ok((instances, _)) = storage.load_with_groups() {
-                if let Some(inst) = instances.iter().find(|i| {
-                    let tmux_name = crate::tmux::Session::generate_name(&i.id, &i.title);
-                    tmux_name == session_name
-                }) {
-                    if args.json {
-                        #[derive(Serialize)]
-                        struct CurrentInfo {
-                            session: String,
-                            profile: String,
-                            id: String,
-                        }
-                        let info = CurrentInfo {
-                            session: inst.title.clone(),
-                            profile: profile_name.clone(),
-                            id: inst.id.clone(),
-                        };
-                        super::output::print_json(&info)?;
-                    } else if args.quiet {
-                        println!("{}", inst.title);
-                    } else {
-                        println!("Session: {}", inst.title);
-                        println!("Profile: {}", profile_name);
-                        println!("ID:      {}", inst.id);
-                    }
-                    return Ok(());
+                if let Some(inst) = instances
+                    .iter()
+                    .find(|i| crate::tmux::Session::generate_name(&i.id, &i.title) == session_name)
+                {
+                    return Ok(Some((profile_name.clone(), inst.clone())));
                 }
             }
         }
     }
 
     bail!("Current tmux session is not an Agent of Empires session")
+}
+
+async fn current_session(args: CurrentArgs) -> Result<()> {
+    let (profile_name, inst) =
+        current_tmux_session()?.ok_or_else(|| anyhow::anyhow!("Not in a tmux session"))?;
+
+    if args.json {
+        #[derive(Serialize)]
+        struct CurrentInfo {
+            session: String,
+            profile: String,
+            id: String,
+        }
+        let info = CurrentInfo {
+            session: inst.title.clone(),
+            profile: profile_name.clone(),
+            id: inst.id.clone(),
+        };
+        super::output::print_json(&info)?;
+    } else if args.quiet {
+        println!("{}", inst.title);
+    } else {
+        println!("Session: {}", inst.title);
+        println!("Profile: {}", profile_name);
+        println!("ID:      {}", inst.id);
+    }
+    Ok(())
+}
+
+/// Parse a CLI signal token into an `Option<SessionSignal>`. Accepts the
+/// canonical meanings, the `clear`/`none` sentinels, and the three
+/// traffic-light color aliases as INPUT only; the stored/returned value is
+/// always canonical. See #2383.
+fn parse_signal(input: &str) -> Result<Option<SessionSignal>> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "blocked" | "red" => Ok(Some(SessionSignal::Blocked)),
+        "working" | "amber" => Ok(Some(SessionSignal::Working)),
+        "done" | "green" => Ok(Some(SessionSignal::Done)),
+        "clear" | "none" => Ok(None),
+        other => bail!(
+            "Unknown signal {:?}. Valid: blocked, working, done, clear (input aliases: red, amber, green, none)",
+            other
+        ),
+    }
+}
+
+fn signal_label(signal: SessionSignal) -> &'static str {
+    match signal {
+        SessionSignal::Blocked => "blocked",
+        SessionSignal::Working => "working",
+        SessionSignal::Done => "done",
+    }
+}
+
+async fn signal_session(profile: &str, args: SignalArgs) -> Result<()> {
+    let parsed = parse_signal(&args.state)?;
+
+    // Explicit selector resolves within the active profile (like set-base);
+    // the self path scans all profiles via the current tmux pane.
+    let (target_profile, id, title) = match args.session.as_deref() {
+        Some(ident) => {
+            let storage = Storage::new_unwatched(profile)?;
+            let instances = storage.load()?;
+            let inst = super::resolve_session(ident, &instances)?;
+            (profile.to_string(), inst.id.clone(), inst.title.clone())
+        }
+        None => match current_tmux_session()? {
+            Some((p, inst)) => (p, inst.id.clone(), inst.title.clone()),
+            None => bail!(
+                "No session given and not inside a tmux pane. Pass one explicitly: aoe session signal {} <session>",
+                args.state
+            ),
+        },
+    };
+
+    let storage = Storage::new_unwatched(&target_profile)?;
+    storage.update(|instances, _groups| {
+        let stored = instances
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found: {}", id))?;
+        stored.signal = parsed;
+        Ok(())
+    })?;
+
+    match parsed {
+        Some(s) => println!("✓ Set signal for '{}': {}", title, signal_label(s)),
+        None => println!("✓ Cleared signal for '{}'", title),
+    }
+    Ok(())
 }
 
 async fn set_session_id(profile: &str, args: SetSessionIdArgs) -> Result<()> {
@@ -1468,6 +1558,79 @@ mod restart_args_tests {
             result.is_err(),
             "passing both branch and --clear should error"
         );
+    }
+
+    #[test]
+    fn signal_state_only_parses_with_no_session() {
+        let cli = Cli::try_parse_from(["aoe", "signal", "working"])
+            .expect("state-only must parse for the self path");
+        match cli.cmd {
+            SessionCommands::Signal(args) => {
+                assert_eq!(args.state, "working");
+                assert!(args.session.is_none());
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+
+    #[test]
+    fn signal_state_and_session_parse() {
+        let cli = Cli::try_parse_from(["aoe", "signal", "done", "claude-3"])
+            .expect("state + session must parse");
+        match cli.cmd {
+            SessionCommands::Signal(args) => {
+                assert_eq!(args.state, "done");
+                assert_eq!(args.session.as_deref(), Some("claude-3"));
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod parse_signal_tests {
+    use super::{parse_signal, SessionSignal};
+
+    #[test]
+    fn canonical_states_parse() {
+        assert_eq!(
+            parse_signal("blocked").unwrap(),
+            Some(SessionSignal::Blocked)
+        );
+        assert_eq!(
+            parse_signal("working").unwrap(),
+            Some(SessionSignal::Working)
+        );
+        assert_eq!(parse_signal("done").unwrap(), Some(SessionSignal::Done));
+    }
+
+    #[test]
+    fn color_aliases_map_to_canonical() {
+        assert_eq!(parse_signal("red").unwrap(), Some(SessionSignal::Blocked));
+        assert_eq!(parse_signal("amber").unwrap(), Some(SessionSignal::Working));
+        assert_eq!(parse_signal("green").unwrap(), Some(SessionSignal::Done));
+    }
+
+    #[test]
+    fn clear_sentinels_parse_to_none() {
+        assert_eq!(parse_signal("clear").unwrap(), None);
+        assert_eq!(parse_signal("none").unwrap(), None);
+    }
+
+    #[test]
+    fn case_and_whitespace_insensitive() {
+        assert_eq!(
+            parse_signal("  Working ").unwrap(),
+            Some(SessionSignal::Working)
+        );
+    }
+
+    #[test]
+    fn rejects_non_traffic_light_palette_and_garbage() {
+        // The decorative palette must NOT be accepted as a signal.
+        assert!(parse_signal("violet").is_err());
+        assert!(parse_signal("teal").is_err());
+        assert!(parse_signal("nonsense").is_err());
     }
 }
 

@@ -49,8 +49,8 @@ pub use groups::{
 };
 pub(crate) use instance::{persist_session_to_storage, ResumeIntent, SidWrite};
 pub use instance::{
-    EnsureReadyError, EnsureReadyOutcome, Instance, LaunchSidOutcome, SandboxInfo, StartOutcome,
-    Status, TerminalInfo, View, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
+    EnsureReadyError, EnsureReadyOutcome, Instance, LaunchSidOutcome, SandboxInfo, SessionSignal,
+    StartOutcome, Status, TerminalInfo, View, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
     TMUX_SESSION_GONE_ERROR,
 };
 
