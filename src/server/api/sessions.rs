@@ -96,7 +96,18 @@ pub struct SessionResponse {
     /// `theme.unread`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
+    /// Strictly a single-repo aoe-managed worktree (`worktree_info`). Drives
+    /// the sidebar "Edit workdir name" action and the tie-workdir overlay,
+    /// neither of which applies to multi-repo workspace sessions. For
+    /// "is there worktree state to clean up on delete", use
+    /// `has_cleanable_worktree` instead.
     pub has_managed_worktree: bool,
+    /// Whether deleting this session has aoe-managed worktree state to remove,
+    /// covering single-repo worktrees AND multi-repo workspaces. Only the
+    /// delete dialog's worktree/branch checkboxes consume this; keeping it
+    /// separate from `has_managed_worktree` avoids lighting up worktree-only
+    /// actions (Edit workdir) for workspace sessions (#2363).
+    pub has_cleanable_worktree: bool,
     /// Whether renaming this session also moves its worktree directory (the
     /// resolved `session.tie_workdir_to_name` for an aoe-managed worktree).
     /// Populated by `list_sessions` from the per-profile config; single-session
@@ -310,6 +321,7 @@ impl SessionResponse {
                 .worktree_info
                 .as_ref()
                 .is_some_and(|w| w.managed_by_aoe),
+            has_cleanable_worktree: inst.has_managed_worktree_or_workspace(),
             // Overlaid per-profile in list_sessions; see the field doc.
             tie_workdir_to_name: false,
             // Overlaid in list_sessions; single-session responses stay inactive.
@@ -5236,6 +5248,41 @@ mod tests {
         assert!(instances.iter().any(|i| i.id == other_id));
     }
 
+    // Regression for #2363: a multi-repo workspace session carries
+    // `workspace_info` and no `worktree_info`. The DTO must report
+    // `has_cleanable_worktree: true` so the web delete dialog shows the
+    // "Delete worktree" checkbox, while keeping `has_managed_worktree: false`
+    // so worktree-only actions (sidebar "Edit workdir name", tie overlay) stay
+    // hidden for workspace sessions.
+    #[test]
+    fn from_instance_reports_managed_worktree_for_workspace_session() {
+        let mut inst = make_test_instance();
+        inst.workspace_info = Some(crate::session::WorkspaceInfo {
+            branch: "feature/abc".to_string(),
+            workspace_dir: "/tmp/ws".to_string(),
+            repos: vec![crate::session::WorkspaceRepo {
+                name: "repo-a".to_string(),
+                source_path: "/tmp/src/repo-a".to_string(),
+                branch: "feature/abc".to_string(),
+                worktree_path: "/tmp/ws/repo-a".to_string(),
+                main_repo_path: "/tmp/src/repo-a".to_string(),
+                managed_by_aoe: true,
+            }],
+            created_at: chrono::Utc::now(),
+            cleanup_on_delete: true,
+        });
+
+        let resp = SessionResponse::from_instance(&inst, false);
+        assert!(
+            resp.has_cleanable_worktree,
+            "workspace session must report a cleanable worktree so the delete checkbox shows"
+        );
+        assert!(
+            !resp.has_managed_worktree,
+            "workspace session must NOT report a single-repo managed worktree (keeps Edit-workdir hidden)"
+        );
+    }
+
     #[test]
     #[serial_test::serial(hook_base)]
     fn from_instance_surfaces_hook_urgent_flag() {
@@ -7166,6 +7213,7 @@ mod workspace_ordering_tests {
             is_sandboxed: false,
             scratch: false,
             has_managed_worktree: false,
+            has_cleanable_worktree: false,
             tie_workdir_to_name: false,
             smart_rename: crate::session::smart_rename::SmartRenameState::Inactive,
             default_name: false,
