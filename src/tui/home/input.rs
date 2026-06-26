@@ -571,6 +571,7 @@ impl HomeView {
                 finalized: false,
             });
             self.drag_state = Some(DragKind::PreviewSelect);
+            tracing::warn!(target: "aoe.dbg", col, row, "drag_start: PreviewSelect installed");
             return true;
         }
         false
@@ -658,6 +659,7 @@ impl HomeView {
                 // a held cursor stall and a moving one lurch one line per
                 // event. The ticker advances it smoothly instead.
                 self.preview_drag_pos = Some((col, row));
+                tracing::warn!(target: "aoe.dbg", col, row, "drag_move: preview_drag_pos set");
                 let new_extent = view.screen_to_content(col, row);
                 let Some(sel) = self.preview_selection.as_mut() else {
                     return false;
@@ -682,10 +684,12 @@ impl HomeView {
             return false;
         }
         let Some((col, row)) = self.preview_drag_pos else {
+            tracing::warn!(target: "aoe.dbg", "tick: PreviewSelect but no drag_pos");
             return false;
         };
         let view = self.preview_text_view;
         let pane = view.pane;
+        tracing::warn!(target: "aoe.dbg", col, row, total_lines = view.total_lines, ?pane, live = self.live_send.is_some(), "tick: PreviewSelect with drag_pos");
         if view.total_lines == 0 || pane.width == 0 || pane.height == 0 {
             return false;
         }
@@ -746,7 +750,13 @@ impl HomeView {
         // agent instead, scrolling its OWN transcript the way the wheel forward
         // does (#2421). The extent stays pinned to the screen edge; the agent's
         // redraw is what reveals more text under the held selection.
-        if page_ready && self.forward_page_to_preview(at_top) {
+        let cur = self
+            .preview_capture_worker
+            .as_ref()
+            .and_then(|w| w.current_cursor());
+        let fwd = page_ready && self.forward_page_to_preview(at_top);
+        tracing::warn!(target: "aoe.dbg", at_top, at_bottom, line_ready, page_ready, ?cur, target = ?self.preview_capture_target, fwd, "tick: edge reached, page-forward branch");
+        if fwd {
             self.preview_autoscroll_at = Some(now);
             return true;
         }
@@ -3511,6 +3521,7 @@ impl HomeView {
             MouseButton::Middle => 1,
             MouseButton::Right => 2,
         };
+        tracing::warn!(target: "aoe.dbg", ?kind, ?modifiers, fwd_btn = ?self.mouse_forward_btn, "forward_mouse_to_preview entry");
         // Decide (button, release, motion) and whether this event even starts
         // or continues a forwarded gesture.
         let (base_button, release, motion) = match kind {

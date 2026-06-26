@@ -942,6 +942,7 @@ impl App {
                             continue;
                         }
                         Some(Ok(Event::Mouse(mouse))) => {
+                            tracing::warn!(target: "aoe.dbg", kind = ?mouse.kind, modifiers = ?mouse.modifiers, col = mouse.column, row = mouse.row, "MOUSE EVENT arrived");
                             // Footer toolbar: a left-click on a button
                             // synthesizes its shortcut and routes it through
                             // the full key handler, so clicking behaves
