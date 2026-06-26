@@ -828,6 +828,12 @@ pub struct HomeView {
     /// today), updated on each `Drag(Left)`, cleared on `Up(Left)`.
     pub(super) drag_state: Option<DragKind>,
 
+    /// The SGR base button code (0/1/2) of a mouse press currently being
+    /// forwarded to the previewed agent (`forward_mouse_to_preview`), so its
+    /// drag and release reach the agent even after the pointer leaves the
+    /// preview rect. `None` when no forwarded button is held.
+    pub(super) mouse_forward_btn: Option<u16>,
+
     /// Last pointer cell reported during a `PreviewSelect` drag, `None`
     /// outside one. The event-loop ticker reads it (`tick_preview_autoscroll`)
     /// to keep scrolling while the cursor is held at the pane edge:
@@ -1520,6 +1526,7 @@ impl HomeView {
             divider_col: None,
             main_area_width: 0,
             drag_state: None,
+            mouse_forward_btn: None,
             preview_drag_pos: None,
             preview_autoscroll_at: None,
             preview_selection: None,

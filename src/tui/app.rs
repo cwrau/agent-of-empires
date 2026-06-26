@@ -970,6 +970,22 @@ impl App {
                                     continue;
                                 }
                             }
+                            // Mouse-tracking agent in live-send: forward the
+                            // press / drag / release straight to it, exactly as
+                            // a direct attach would. Shift falls through to
+                            // aoe's own preview text-selection. Consumes the
+                            // event when it forwards.
+                            if self.home.forward_mouse_to_preview(
+                                mouse.kind,
+                                mouse.modifiers,
+                                mouse.column,
+                                mouse.row,
+                            ) {
+                                if !self.needs_redraw {
+                                    self.draw(terminal)?;
+                                }
+                                continue;
+                            }
                             let hit_list = self.home.hit_list(mouse.column, mouse.row);
                             let hit_preview = self.home.hit_preview(mouse.column, mouse.row);
                             let hit_diff = self.home.is_diff_open()
