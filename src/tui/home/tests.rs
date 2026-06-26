@@ -9016,6 +9016,116 @@ mod scroll_pane_isolation {
         assert_eq!(env.view.preview_scroll_offset, 0);
     }
 
+    /// In live-send over a mouse-tracking agent, a plain (no-Shift) left
+    /// press/release is forwarded to the agent and consumed, and the held
+    /// button is tracked so its release can't be stranded.
+    #[test]
+    #[serial]
+    fn forward_mouse_to_preview_left_click_forwards() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        let mut env = live_env_with_cursor(alt_screen_cursor(true, true, true));
+        assert!(env.view.forward_mouse_to_preview(
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::NONE,
+            50,
+            10
+        ));
+        assert_eq!(env.view.mouse_forward_btn, Some(0));
+        assert!(env.view.forward_mouse_to_preview(
+            MouseEventKind::Up(MouseButton::Left),
+            KeyModifiers::NONE,
+            50,
+            10
+        ));
+        assert_eq!(env.view.mouse_forward_btn, None);
+        // Forwarding never starts an aoe text selection.
+        assert!(env.view.drag_state.is_none());
+        assert!(env.view.preview_selection.is_none());
+    }
+
+    /// Shift+press is NOT forwarded: it falls through so aoe's own preview
+    /// text-selection (drag-to-copy) can run.
+    #[test]
+    #[serial]
+    fn forward_mouse_to_preview_shift_falls_through() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        let mut env = live_env_with_cursor(alt_screen_cursor(true, true, true));
+        assert!(!env.view.forward_mouse_to_preview(
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::SHIFT,
+            50,
+            10
+        ));
+        assert_eq!(env.view.mouse_forward_btn, None);
+    }
+
+    /// A non-mouse agent never forwards; the event falls through to aoe.
+    #[test]
+    #[serial]
+    fn forward_mouse_to_preview_non_mouse_agent_falls_through() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        let mut env = live_env_with_cursor(alt_screen_cursor(true, false, false));
+        assert!(!env.view.forward_mouse_to_preview(
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::NONE,
+            50,
+            10
+        ));
+    }
+
+    /// Once a press is forwarded, its drag and release keep forwarding even
+    /// after the pointer leaves the preview rect, so the agent always sees the
+    /// release (no stuck button).
+    #[test]
+    #[serial]
+    fn forward_mouse_to_preview_drag_and_release_track_button() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        let mut env = live_env_with_cursor(alt_screen_cursor(true, true, true));
+        assert!(env.view.forward_mouse_to_preview(
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::NONE,
+            50,
+            10
+        ));
+        // (1, 1) is outside the preview rect, but the drag still forwards.
+        assert!(env.view.forward_mouse_to_preview(
+            MouseEventKind::Drag(MouseButton::Left),
+            KeyModifiers::NONE,
+            1,
+            1
+        ));
+        assert_eq!(env.view.mouse_forward_btn, Some(0));
+        assert!(env.view.forward_mouse_to_preview(
+            MouseEventKind::Up(MouseButton::Left),
+            KeyModifiers::NONE,
+            1,
+            1
+        ));
+        assert_eq!(env.view.mouse_forward_btn, None);
+    }
+
+    /// A drag or release with no forwarded press in flight is ignored (it must
+    /// not start forwarding mid-gesture).
+    #[test]
+    #[serial]
+    fn forward_mouse_to_preview_orphan_drag_ignored() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        let mut env = live_env_with_cursor(alt_screen_cursor(true, true, true));
+        assert!(!env.view.forward_mouse_to_preview(
+            MouseEventKind::Drag(MouseButton::Left),
+            KeyModifiers::NONE,
+            50,
+            10
+        ));
+        assert!(!env.view.forward_mouse_to_preview(
+            MouseEventKind::Up(MouseButton::Left),
+            KeyModifiers::NONE,
+            50,
+            10
+        ));
+        assert_eq!(env.view.mouse_forward_btn, None);
+    }
+
     /// A full-screen app with mouse tracking but in the LEGACY (non-SGR)
     /// encoding is still forwarded; the byte builder emits X10-encoded
     /// bytes for it instead of SGR (see `wheel_mouse_bytes_legacy_encodes_x10`).

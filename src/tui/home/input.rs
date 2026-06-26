@@ -188,14 +188,25 @@ fn split_bracketed_paste(text: &str) -> Vec<live_send::TmuxKey> {
     vec![live_send::TmuxKey::HexBytes(bytes)]
 }
 
+/// Map a hovered screen cell `(col, row)` into a forwarded app's 1-based
+/// mouse coordinate space, relative to its pane `pane` (the live-send target
+/// is sized to the preview output rect, so this maps directly), clamped
+/// inside the pane. An unpopulated rect falls back to the top-left cell.
+/// Shared by the wheel- and click-forward byte builders.
+fn map_pane_cell(pane: ratatui::layout::Rect, col: u16, row: u16) -> (u16, u16) {
+    if pane.width == 0 || pane.height == 0 {
+        (1u16, 1u16)
+    } else {
+        let cx = col.saturating_sub(pane.x).min(pane.width - 1) + 1;
+        let cy = row.saturating_sub(pane.y).min(pane.height - 1) + 1;
+        (cx, cy)
+    }
+}
+
 /// Build the mouse-wheel byte sequence to forward to a full-screen app
 /// under the live preview. `up` selects wheel-up (button 64) vs wheel-down
 /// (65); `sgr` selects the SGR (1006) encoding vs the legacy X10 encoding,
-/// matching whatever the app has enabled. The hovered screen cell
-/// `(col, row)` is mapped into the app's 1-based coordinate space relative
-/// to its pane `pane` (the live-send target is sized to the preview output
-/// rect, so this maps directly), clamped inside the pane; an unpopulated
-/// rect falls back to the top-left cell.
+/// matching whatever the app has enabled.
 fn wheel_mouse_bytes(
     up: bool,
     sgr: bool,
@@ -203,13 +214,7 @@ fn wheel_mouse_bytes(
     col: u16,
     row: u16,
 ) -> Vec<u8> {
-    let (cx, cy) = if pane.width == 0 || pane.height == 0 {
-        (1u16, 1u16)
-    } else {
-        let cx = col.saturating_sub(pane.x).min(pane.width - 1) + 1;
-        let cy = row.saturating_sub(pane.y).min(pane.height - 1) + 1;
-        (cx, cy)
-    };
+    let (cx, cy) = map_pane_cell(pane, col, row);
     let button: u16 = if up { 64 } else { 65 };
     if sgr {
         // SGR (1006): textual, press marker `M`. No coordinate limit.
@@ -220,6 +225,38 @@ fn wheel_mouse_bytes(
         // encoded; clamp there (preview cells are far below that anyway).
         let enc = |v: u16| (v.min(223) + 32) as u8;
         vec![0x1b, b'[', b'M', enc(button), enc(cx), enc(cy)]
+    }
+}
+
+/// Build the byte sequence for a single forwarded mouse button event at
+/// screen cell `(col, row)`, mapped into the app's pane. `base_button` is the
+/// SGR low-bits code (left=0, middle=1, right=2); `release` is a button-up;
+/// `motion` is a drag (button held while moving). `sgr` picks SGR (1006) vs
+/// the legacy X10 encoding, matching the app. Mirrors `wheel_mouse_bytes`,
+/// which is just the wheel buttons (64/65).
+fn mouse_event_bytes(
+    base_button: u16,
+    release: bool,
+    motion: bool,
+    sgr: bool,
+    pane: ratatui::layout::Rect,
+    col: u16,
+    row: u16,
+) -> Vec<u8> {
+    let (cx, cy) = map_pane_cell(pane, col, row);
+    // The motion bit (32) rides on press/drag reports in both encodings.
+    let cb = base_button + if motion { 32 } else { 0 };
+    if sgr {
+        // SGR (1006): press/drag end with `M`, release with `m`; the button
+        // identity survives on release (unlike X10).
+        let end = if release { 'm' } else { 'M' };
+        format!("\x1b[<{cb};{cx};{cy}{end}").into_bytes()
+    } else {
+        // Legacy X10: `ESC [ M` then three bytes, each value + 32 (clamped at
+        // 223). A release can't carry a button, so it uses the agnostic 3.
+        let enc = |v: u16| (v.min(223) + 32) as u8;
+        let btn = if release { 3 } else { cb };
+        vec![0x1b, b'[', b'M', enc(btn), enc(cx), enc(cy)]
     }
 }
 
@@ -3366,13 +3403,18 @@ impl HomeView {
         else {
             return false;
         };
-        // The cursor and the mapped coordinates describe the pane the preview
-        // is showing (`preview_capture_target`), so the keys must go THERE.
-        // Route through the ordered live-send worker only when that pane is
-        // also the live-send target, so scroll stays in sequence with typed
-        // keystrokes; otherwise (passive preview, or live-send aimed at a
-        // different pane than the one on screen) fork a one-shot send to the
-        // displayed pane.
+        self.send_to_preview_pane(key)
+    }
+
+    /// Send a forwarded key/mouse-byte payload to the pane the preview is
+    /// showing (`preview_capture_target`). The cursor and mapped coordinates
+    /// describe THAT pane, so the bytes must go there. Route through the
+    /// ordered live-send worker only when the displayed pane is also the
+    /// live-send target, so the event stays in sequence with typed
+    /// keystrokes; otherwise (passive preview, or live-send aimed at a
+    /// different pane than the one on screen) fork a one-shot send. Returns
+    /// true when something was dispatched.
+    fn send_to_preview_pane(&self, key: live_send::TmuxKey) -> bool {
         let Some(target) = self.preview_capture_target.as_deref() else {
             return false;
         };
@@ -3384,6 +3426,86 @@ impl HomeView {
         }
         live_send::send_key_oneshot(target, key);
         true
+    }
+
+    /// The previewed agent's cursor when a mouse button event over the preview
+    /// should be forwarded to it instead of driving aoe's own UI: live-send
+    /// only, and the pane must be a full-screen app with mouse tracking on (the
+    /// same gate as the wheel's mouse-byte branch). `None` means let the event
+    /// fall through to aoe's handlers (selection, etc.). Returns the cursor so
+    /// the caller can read `mouse_sgr` for the encoding.
+    fn preview_forwards_mouse(&self) -> Option<crate::tmux::PaneCursor> {
+        self.live_send.as_ref()?;
+        let cursor = self
+            .preview_capture_worker
+            .as_ref()
+            .and_then(|w| w.current_cursor())?;
+        (cursor.alternate_on && cursor.mouse_tracking).then_some(cursor)
+    }
+
+    /// Forward a mouse button event (press / release / drag) over the preview
+    /// straight to the previewed agent, the way a direct tmux attach would.
+    /// `Shift` is the escape hatch: a Shift-held event returns `false` so it
+    /// falls through to aoe's own preview text-selection. Returns `true` when
+    /// the event was forwarded (and should be consumed). Wheel and bare-motion
+    /// events are not handled here (the wheel has its own path; bare motion is
+    /// not forwarded).
+    ///
+    /// A button held down is tracked in `mouse_forward_btn` so its drag and
+    /// release reach the agent even if the pointer leaves the preview rect
+    /// mid-drag, which keeps the agent from seeing a stuck button.
+    pub fn forward_mouse_to_preview(
+        &mut self,
+        kind: crossterm::event::MouseEventKind,
+        modifiers: crossterm::event::KeyModifiers,
+        col: u16,
+        row: u16,
+    ) -> bool {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let base = |b: MouseButton| match b {
+            MouseButton::Left => 0u16,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        };
+        // Decide (button, release, motion) and whether this event even starts
+        // or continues a forwarded gesture.
+        let (base_button, release, motion) = match kind {
+            MouseEventKind::Down(b) => {
+                if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    return false; // Shift+press => aoe selection
+                }
+                // A modal over the preview owns the click (dismiss / button).
+                if self.has_non_live_send_overlay() {
+                    return false;
+                }
+                if self.preview_forwards_mouse().is_none() || !self.hit_preview(col, row) {
+                    return false;
+                }
+                (base(b), false, false)
+            }
+            // A drag / release only forwards if its press was forwarded (we're
+            // mid-gesture); position is no longer gated so the release lands.
+            MouseEventKind::Drag(b) if self.mouse_forward_btn.is_some() => (base(b), false, true),
+            MouseEventKind::Up(b) if self.mouse_forward_btn.is_some() => (base(b), true, false),
+            _ => return false,
+        };
+        let Some(cursor) = self.preview_forwards_mouse() else {
+            // The pane stopped being a mouse agent mid-gesture; drop the
+            // tracked button so we don't strand it.
+            self.mouse_forward_btn = None;
+            return false;
+        };
+        self.mouse_forward_btn = if release { None } else { Some(base_button) };
+        let bytes = mouse_event_bytes(
+            base_button,
+            release,
+            motion,
+            cursor.mouse_sgr,
+            self.preview_text_view.pane,
+            col,
+            row,
+        );
+        self.send_to_preview_pane(live_send::TmuxKey::HexBytes(bytes))
     }
 
     pub fn handle_scroll_up(&mut self, col: u16, row: u16) -> bool {
@@ -5259,6 +5381,46 @@ mod tests {
             wheel_mouse_bytes(true, false, wide, 300, 300),
             vec![0x1b, b'[', b'M', 64 + 32, 223 + 32, 223 + 32]
         );
+    }
+
+    #[test]
+    fn mouse_event_bytes_sgr_press_release_and_drag() {
+        use ratatui::layout::Rect;
+        let pane = Rect::new(0, 0, 80, 24);
+        // Cell (10,5) maps to 1-based (11,6). SGR: press `M`, release `m`,
+        // keeping the button identity; a drag adds the motion bit (+32).
+        assert_eq!(
+            mouse_event_bytes(0, false, false, true, pane, 10, 5),
+            b"\x1b[<0;11;6M"
+        ); // left press
+        assert_eq!(
+            mouse_event_bytes(0, true, false, true, pane, 10, 5),
+            b"\x1b[<0;11;6m"
+        ); // left release
+        assert_eq!(
+            mouse_event_bytes(2, false, false, true, pane, 10, 5),
+            b"\x1b[<2;11;6M"
+        ); // right press
+        assert_eq!(
+            mouse_event_bytes(0, false, true, true, pane, 10, 5),
+            b"\x1b[<32;11;6M"
+        ); // left drag (0 + motion 32)
+    }
+
+    #[test]
+    fn mouse_event_bytes_x10_press_button_release_agnostic() {
+        use ratatui::layout::Rect;
+        let pane = Rect::new(0, 0, 80, 24);
+        // Legacy X10: ESC [ M then (button+32, cx+32, cy+32). Cell (10,5) =>
+        // (11,6). A release is the button-agnostic 3.
+        assert_eq!(
+            mouse_event_bytes(0, false, false, false, pane, 10, 5),
+            vec![0x1b, b'[', b'M', 0 + 32, 11 + 32, 6 + 32]
+        ); // left press
+        assert_eq!(
+            mouse_event_bytes(0, true, false, false, pane, 10, 5),
+            vec![0x1b, b'[', b'M', 3 + 32, 11 + 32, 6 + 32]
+        ); // release => button 3
     }
 
     fn cursor_for(
