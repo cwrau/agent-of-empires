@@ -52,6 +52,64 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, state: &StructuredVi
     } else if state.mention.is_some() {
         render_mention_picker(frame, chunks[3], theme, state);
     }
+    // The plugin pane panel is a modal overlay drawn over everything when open
+    // (#2467); it owns the keyboard while up, so nothing else needs to coexist.
+    if matches!(state.focus, Focus::Pane) {
+        render_pane_panel(frame, area, theme, state);
+    }
+}
+
+/// The plugin pane panel (#2467): a read-only overlay showing the open session's
+/// `pane` entries. Anchored to the right half on a wide terminal, full width on
+/// a narrow one. Scrolls by logical line; the scroll offset is clamped here to
+/// the content height so `G` (bottom) and overscroll land on the last screen.
+fn render_pane_panel(frame: &mut Frame, area: Rect, theme: &Theme, state: &StructuredViewState) {
+    let panel = if area.width >= 100 {
+        let half = area.width / 2;
+        Rect {
+            x: area.x + (area.width - half),
+            y: area.y,
+            width: half,
+            height: area.height,
+        }
+    } else {
+        area
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1))
+        .title(" Plugin pane (j/k=scroll · Esc=close) ")
+        .border_style(Style::default().fg(theme.title));
+    let inner = block.inner(panel);
+    frame.render_widget(Clear, panel);
+    frame.render_widget(block, panel);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let lines = plugin_ui::pane_lines(&state.plugin_ui, &state.session_id, theme);
+    if lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No plugin pane for this session.",
+                Style::default().fg(theme.dimmed),
+            ))),
+            inner,
+        );
+        return;
+    }
+    // Logical-line scroll: a single long block that wraps past the viewport
+    // scrolls as one unit. Acceptable for a read-only first pass; visual-line
+    // scroll can come later if it bites.
+    let height = visual_line_count(&lines, inner.width);
+    let max_scroll = height.saturating_sub(inner.height);
+    let offset = state.pane_scroll.min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((offset, 0)),
+        inner,
+    );
 }
 
 /// Up to this many queued prompts are previewed in the strip; the rest
@@ -1031,8 +1089,11 @@ fn help_hint(focus: Focus) -> &'static str {
         Focus::Composer => {
             " Enter=send · Shift+Enter=newline · /=commands · Esc=back · Ctrl-C=cancel "
         }
-        Focus::Transcript => " j/k=scroll · i=compose · Tab=approvals · o=browser · Esc=exit ",
+        Focus::Transcript => {
+            " j/k=scroll · i=compose · Tab=approvals · p=plugin pane · o=browser · Esc=exit "
+        }
         Focus::Approval => " a=allow · A=always · d=deny · Esc=back ",
+        Focus::Pane => " j/k=scroll · g/G=top/bottom · Tab=compose · Esc/p=close ",
     }
 }
 

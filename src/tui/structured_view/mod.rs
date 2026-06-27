@@ -451,6 +451,10 @@ async fn handle_terminal_event(
             } else {
                 focus
             };
+            // Opening the pane panel starts from the top each time.
+            if matches!(state.focus, Focus::Pane) {
+                state.pane_scroll = 0;
+            }
             // Leaving the composer ends any queue-recall browse; the
             // in-progress text stays put as a draft.
             if state.focus != Focus::Composer {
@@ -591,7 +595,13 @@ async fn handle_terminal_event(
             Ok(false)
         }
         Intent::Scroll(delta) => {
-            apply_scroll(state, delta);
+            // The pane panel and the transcript share the scroll keys; route by
+            // which one is focused.
+            if matches!(state.focus, Focus::Pane) {
+                apply_pane_scroll(state, delta);
+            } else {
+                apply_scroll(state, delta);
+            }
             Ok(false)
         }
         Intent::ResolveApproval(decision) => {
@@ -888,6 +898,21 @@ fn apply_scroll(state: &mut StructuredViewState, delta: i32) {
         state.scroll_offset = state.scroll_offset.saturating_sub((-delta) as u16);
     } else {
         state.scroll_offset = state.scroll_offset.saturating_add(delta as u16);
+    }
+}
+
+/// Scroll the plugin pane panel. `u16::MAX` is the bottom sentinel (the
+/// renderer clamps it to the content height), mirroring the transcript's
+/// stick-to-bottom convention.
+fn apply_pane_scroll(state: &mut StructuredViewState, delta: i32) {
+    if delta == i32::MIN {
+        state.pane_scroll = 0;
+    } else if delta == i32::MAX {
+        state.pane_scroll = u16::MAX;
+    } else if delta < 0 {
+        state.pane_scroll = state.pane_scroll.saturating_sub((-delta) as u16);
+    } else {
+        state.pane_scroll = state.pane_scroll.saturating_add(delta as u16);
     }
 }
 

@@ -86,6 +86,10 @@ pub struct StructuredViewState {
     /// Notification bookkeeping so each `ui.notify` toasts once. See
     /// [`PluginNotifyState`].
     pub plugin_notify: PluginNotifyState,
+    /// Vertical scroll of the plugin pane panel (#2467), in logical lines.
+    /// `u16::MAX` sticks to the bottom; the renderer clamps it to the content
+    /// height. Reset to 0 each time the panel is opened.
+    pub pane_scroll: u16,
 }
 
 /// Tracks which plugin notifications have been shown and buffers any awaiting
@@ -186,6 +190,7 @@ impl StructuredViewState {
                 notifications: Vec::new(),
             },
             plugin_notify: PluginNotifyState::default(),
+            pane_scroll: 0,
         }
     }
 
