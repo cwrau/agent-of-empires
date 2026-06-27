@@ -344,7 +344,10 @@ fn indent_span(indent: usize) -> Vec<Span<'static>> {
 /// Skips the leading space when the line started with an indent span (the
 /// indent already separates it from the margin).
 fn push_sep(spans: &mut Vec<Span<'static>>, indent: usize) {
-    if !spans.is_empty() && !(spans.len() == 1 && indent > 0) {
+    // The line is empty, or holds only the leading indent span: no field has
+    // been pushed yet, so the next one needs no separator.
+    let only_indent = indent > 0 && spans.len() == 1;
+    if !spans.is_empty() && !only_indent {
         spans.push(Span::raw(" "));
     }
 }
