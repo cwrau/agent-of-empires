@@ -106,7 +106,7 @@ fn rewire_disk_subscriptions_is_noop_without_tokio_runtime() {
             .disk_watch
             .dirty
             .load(std::sync::atomic::Ordering::Acquire),
-        "the noop branch must leave disk_dirty clear outside a runtime"
+        "the noop branch must leave disk_watch.dirty clear outside a runtime"
     );
 }
 

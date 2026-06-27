@@ -152,7 +152,7 @@ async fn rewire_disk_subscriptions_drops_removed_profile_entry() {
     assert_eq!(
         view.disk_watch.handles.len(),
         1,
-        "exactly the surviving profile's disk_watch_handles entry remains; live `subscriber_count()` also includes config-watch subscriptions wired by `rewire_config_subscriptions` and is not the right invariant for the disk-only path"
+        "exactly the surviving profile's disk_watch.handles entry remains; live `subscriber_count()` also includes config-watch subscriptions wired by `rewire_config_subscriptions` and is not the right invariant for the disk-only path"
     );
 }
 
