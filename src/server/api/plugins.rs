@@ -137,6 +137,12 @@ pub struct PluginActionBody {
     pub method: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    /// The session whose pane fired the action, if any. The host reads the
+    /// baseline revision for this `(plugin, session)` scope so the dashboard
+    /// waits only for that pane's re-pushed state; it is not forwarded to the
+    /// worker.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// `POST /api/plugins/{id}/action`: forward a dashboard UI action (a pane
@@ -168,8 +174,33 @@ pub async fn invoke_plugin_action(
             "Plugin host is not running".into(),
         );
     };
-    if host.notify_worker(&id, &body.method, body.params).await {
-        (StatusCode::ACCEPTED, Json(json!({ "ok": true }))).into_response()
+    // Read the pane's UI revision before forwarding, not the value the dashboard
+    // last polled: that one is stale, so an unrelated push between the last poll
+    // and this click would already exceed it and clear the spinner before the
+    // worker has done anything. Scoped to the firing pane's session so another
+    // session's activity cannot move it. The dashboard holds the spinner until
+    // this scope's revision moves off the baseline.
+    let baseline_revision = host.ui_revision(&id, body.session_id.as_deref());
+    // Forward the firing pane's session to the worker so a per-session action
+    // (e.g. github.refresh) can scope its work to that session instead of every
+    // one. Merged into the params object; a worker that does not use it ignores
+    // it (the honest-plugin model).
+    let mut params = body.params;
+    if let Some(sid) = &body.session_id {
+        match &mut params {
+            serde_json::Value::Object(map) => {
+                map.insert("session_id".into(), serde_json::Value::String(sid.clone()));
+            }
+            serde_json::Value::Null => params = json!({ "session_id": sid }),
+            _ => {}
+        }
+    }
+    if host.notify_worker(&id, &body.method, params).await {
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ok": true, "baseline_revision": baseline_revision })),
+        )
+            .into_response()
     } else {
         error_response(
             StatusCode::NOT_FOUND,

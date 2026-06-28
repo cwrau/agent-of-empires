@@ -6,11 +6,16 @@
 // sort-key and filter-facet slots render as sidebar sort options and a facet
 // filter (the sidebar owns those; see SidebarSortPicker / WorkspaceSidebar, #2401).
 
-import { createElement, useId, useRef, useState } from "react";
+import { createElement, useEffect, useId, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 
 import { invokePluginAction } from "../../lib/api";
-import { usePluginUiEntries, usePluginUiRefreshing } from "../../lib/pluginUiContext";
+import {
+  usePluginUiEntries,
+  usePluginUiPoke,
+  usePluginUiRefreshing,
+  usePluginUiRevision,
+} from "../../lib/pluginUiContext";
 import {
   accentStyle,
   entryText,
@@ -312,32 +317,80 @@ function Spinner({ className }: { className: string }) {
   );
 }
 
+// A pane action's spinner clears after this even if no fresh state arrives, so
+// a worker that processes the action without re-pushing (no sessions, ignored
+// method, mid-refresh crash) can never leave the button spinning forever.
+const ACTION_TIMEOUT_MS = 15000;
+
 /** An `action` pane block: a button that forwards a worker method (named by the
- *  plugin) to that plugin's worker. Fire-and-forget; the worker re-pushes its
- *  UI state, which the next poll renders. While the POST is in flight the button
- *  disables and swaps its icon for a spinner, so a refresh shows it is underway;
- *  `invokePluginAction` never rejects (it returns false on failure), so the
- *  `finally` always restores the button to an actionable state. An icon is
- *  optional. */
-function BlockAction({ block, pluginId }: { block: Record<string, unknown>; pluginId: string }) {
+ *  plugin) to that plugin's worker. The worker runs the method and re-pushes its
+ *  UI state, which a later poll renders. The button spins from the click until
+ *  the plugin's UI revision moves off the baseline the action POST returned (the
+ *  worker's re-pushed state has landed), not merely until the POST is accepted,
+ *  with a hard timeout fallback so it can never hang. A failed POST clears the
+ *  spinner at once. An icon is optional. */
+function BlockAction({
+  block,
+  pluginId,
+  sessionId,
+}: {
+  block: Record<string, unknown>;
+  pluginId: string;
+  sessionId?: string;
+}) {
   const label = str(block, "label");
   const method = str(block, "method");
   const iconComp = lucideIcon(str(block, "icon"));
-  const [busy, setBusy] = useState(false);
-  // A ref guard, not just `busy`: two clicks in the same tick both see the old
-  // `busy` state before React commits the update, so the boolean alone would
-  // double-fire. The ref flips synchronously.
-  const busyRef = useRef(false);
+  const revision = usePluginUiRevision(pluginId, sessionId);
+  const poke = usePluginUiPoke();
+  // `posting`: the POST is in flight. `waitBaseline`: the revision the host had
+  // when it accepted the action; the button keeps spinning until the polled
+  // revision moves off it (the worker's re-pushed state landed) or the timeout
+  // fires. Stored as state so a polled revision change re-renders the button.
+  const [posting, setPosting] = useState(false);
+  const [waitBaseline, setWaitBaseline] = useState<number | null>(null);
+  // Guards a same-tick double-fire of the POST, before `posting` commits and
+  // `disabled` takes effect; the wait phase is guarded by `busy`/`disabled`.
+  const postingRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Derived in render, so nothing has to chase the revision in an effect: still
+  // waiting only while the polled revision has not moved off the baseline. `!==`
+  // so a daemon restart that resets the counter to a lower value also clears.
+  const waiting = waitBaseline !== null && revision === waitBaseline;
+  const busy = posting || waiting;
+
+  // Only an unmount guard: stop the fallback timer so it cannot fire setState on
+  // an unmounted block. No state writes here, so no effect-chases-event lint.
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
   if (!label || !method) return null;
   const onClick = async () => {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
+    if (postingRef.current || busy) return;
+    postingRef.current = true;
+    setPosting(true);
     try {
-      await invokePluginAction(pluginId, method);
+      const accepted = await invokePluginAction(pluginId, method, sessionId);
+      if (!accepted) return; // 403/404/network: nothing re-pushes, stop spinning
+      poke();
+      // No baseline (older daemon): can't track completion, so degrade to
+      // clearing when the POST settles rather than spinning to the timeout.
+      if (accepted.baselineRevision === null) return;
+      // Hold the spinner until the revision moves off this baseline (see above).
+      setWaitBaseline(accepted.baselineRevision);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        setWaitBaseline(null);
+        timerRef.current = null;
+      }, ACTION_TIMEOUT_MS);
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      postingRef.current = false;
+      setPosting(false);
     }
   };
   return (
@@ -434,7 +487,15 @@ function BlockComment({ block }: { block: Record<string, unknown> }) {
  *  an unknown `kind` (or a known kind missing its required field) renders
  *  nothing rather than throwing, so a newer plugin can push kinds an older host
  *  has never heard of. */
-function DetailBlock({ block, pluginId }: { block: Record<string, unknown>; pluginId: string }) {
+function DetailBlock({
+  block,
+  pluginId,
+  sessionId,
+}: {
+  block: Record<string, unknown>;
+  pluginId: string;
+  sessionId?: string;
+}) {
   switch (str(block, "kind")) {
     case "heading": {
       const text = str(block, "text");
@@ -451,11 +512,11 @@ function DetailBlock({ block, pluginId }: { block: Record<string, unknown>; plug
     case "divider":
       return <hr className="border-surface-700/60" />;
     case "action":
-      return <BlockAction block={block} pluginId={pluginId} />;
+      return <BlockAction block={block} pluginId={pluginId} sessionId={sessionId} />;
     case "section": {
       const title = str(block, "title");
       const children = Array.isArray(block.children) ? block.children.filter(isObject) : [];
-      const body = children.map((c, i) => <DetailBlock key={i} block={c} pluginId={pluginId} />);
+      const body = children.map((c, i) => <DetailBlock key={i} block={c} pluginId={pluginId} sessionId={sessionId} />);
       // An optional tone-tinted icon on the title gives an at-a-glance status
       // even when the section is folded (e.g. a green check vs a red x).
       const tone = validTone(block.tone);
@@ -520,7 +581,7 @@ export function PluginPaneBody({ entry }: { entry: PluginUiEntry }) {
       {blocks ? (
         <div className="flex flex-col gap-1.5">
           {blocks.map((b, i) => (
-            <DetailBlock key={i} block={b} pluginId={entry.plugin_id} />
+            <DetailBlock key={i} block={b} pluginId={entry.plugin_id} sessionId={entry.session_id} />
           ))}
         </div>
       ) : (

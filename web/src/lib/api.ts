@@ -645,6 +645,11 @@ export interface PluginUiNotification {
 export interface PluginUiState {
   entries: PluginUiEntry[];
   notifications: PluginUiNotification[];
+  /** Mutation counter per plugin, then per scope (a session id, or `""` for a
+   *  global slot). A manual pane action records the baseline the action POST
+   *  returns and holds its spinner until its own scope's counter moves off it,
+   *  so another session's push never clears it. Absent on an older daemon. */
+  revisions?: Record<string, Record<string, number>>;
 }
 
 /** The host's aggregated UI-state snapshot. Returns an empty state (not null)
@@ -674,26 +679,43 @@ export async function setPluginEnabled(id: string, enabled: boolean): Promise<Pl
   }
 }
 
+/** A worker accepted an action. `baselineRevision` is the scope's UI mutation
+ *  counter the host read before forwarding; the pane holds its spinner until
+ *  the polled counter moves off this value. `null` means the daemon did not
+ *  report a baseline (older daemon), so the caller skips the wait and just
+ *  clears when the POST settles. */
+export interface PluginActionAccepted {
+  baselineRevision: number | null;
+}
+
 /**
  * Forward a plugin pane's UI action (e.g. a "Refresh" button) to the plugin's
- * worker. Fire-and-forget: the worker runs the named method and re-pushes its
- * UI state, which the next ui-state poll renders. Returns false on read-only
+ * worker. Fire-and-forget at the worker: the worker runs the named method and
+ * re-pushes its UI state, which a later ui-state poll renders. `sessionId`
+ * scopes the baseline revision to the firing pane's session. Returns the
+ * accepted baseline (or null if the daemon omitted one), or null on read-only
  * (403), no running worker (404), or network failure.
  */
 export async function invokePluginAction(
   pluginId: string,
   method: string,
+  sessionId?: string,
   params: Record<string, unknown> = {},
-): Promise<boolean> {
+): Promise<PluginActionAccepted | null> {
   try {
     const res = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/action`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method, params }),
+      body: JSON.stringify({ method, params, session_id: sessionId ?? null }),
     });
-    return res.ok;
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => null)) as { baseline_revision?: unknown } | null;
+    // A missing baseline (older daemon) is a sentinel, not revision 0: 0 would
+    // wedge the spinner until timeout since the polled revision is also 0.
+    const rev = typeof body?.baseline_revision === "number" ? body.baseline_revision : null;
+    return { baselineRevision: rev };
   } catch {
-    return false;
+    return null;
   }
 }
 

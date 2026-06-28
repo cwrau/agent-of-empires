@@ -96,6 +96,14 @@ impl PluginHost {
         self.api.ui_snapshot()
     }
 
+    /// The UI mutation counter for one `(plugin, session)` scope. The action
+    /// endpoint reads this for the clicked pane's session before forwarding, so
+    /// the dashboard can hold that pane's spinner until its re-pushed state
+    /// moves the counter off this baseline.
+    pub fn ui_revision(&self, plugin_id: &str, session_id: Option<&str>) -> u64 {
+        self.api.ui_revision(plugin_id, session_id)
+    }
+
     /// Push a host-originated notification onto the ring (e.g. the auto-update
     /// sweep telling the user an update needs approval). Best-effort.
     pub fn notify_host(
