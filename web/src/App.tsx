@@ -40,7 +40,12 @@ import { usePaneLayout, dockTabs, dockGroups, dockOf, isActiveTab } from "./lib/
 import { isPluginPaneId, usePluginPanes, type PluginPane } from "./lib/pluginPanes";
 import { PluginPaneBody } from "./components/plugin/PluginSlots";
 import { TOUR_ANCHORS, tourAnchor } from "./lib/tourSteps";
-import { deleteWorkspaceSessions, restoreSessions, trashSessions } from "./lib/trashActions";
+import {
+  deleteWorkspaceSessions,
+  restoreSessions,
+  trashedWorkspaceRestoreIds,
+  trashSessions,
+} from "./lib/trashActions";
 import {
   loginStatus,
   logout,
@@ -1532,6 +1537,11 @@ function AppContent({ loginRequired, onLogout }: { loginRequired: boolean; onLog
                         archivedAt={activeSession.archived_at ?? null}
                         snoozedUntil={activeSession.snoozed_until ?? null}
                         trashedAt={activeSession.trashed_at ?? null}
+                        onRestore={
+                          activeSession.trashed_at
+                            ? () => handleRestoreSession(trashedWorkspaceRestoreIds(workspaces, activeSessionId!))
+                            : undefined
+                        }
                         onOpenFileRef={handleOpenFileRef}
                         fileRefSession={activeSession}
                         onOpenAgentsPane={openAgentsPane}
