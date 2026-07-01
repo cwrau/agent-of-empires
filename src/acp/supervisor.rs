@@ -1420,6 +1420,7 @@ impl<S: BroadcastSink> Supervisor<S> {
             source_profile,
             mcp_servers,
             seed_history_replay,
+            artifact_dir: crate::session::artifacts::session_artifact_dir(&session_id).ok(),
         };
 
         debug!(
@@ -3396,6 +3397,7 @@ mod tests {
             socket_path: Some(socket_path.clone()),
             stored_acp_session_id: None,
             seed_history_replay: false,
+            artifact_dir: None,
             sandbox_info: None,
             source_profile: None,
             mcp_servers: Vec::new(),
@@ -3488,6 +3490,7 @@ mod tests {
             socket_path: Some(tmp.path().join("dummy.sock")),
             stored_acp_session_id: None,
             seed_history_replay: false,
+            artifact_dir: None,
             sandbox_info: None,
             source_profile: None,
             mcp_servers: Vec::new(),
@@ -3563,6 +3566,7 @@ mod tests {
             socket_path: Some(tmp.path().join("dummy.sock")),
             stored_acp_session_id: None,
             seed_history_replay: false,
+            artifact_dir: None,
             sandbox_info: None,
             source_profile: None,
             mcp_servers: Vec::new(),
@@ -3638,6 +3642,7 @@ mod tests {
             socket_path: Some(tmp.path().join("dummy.sock")),
             stored_acp_session_id: None,
             seed_history_replay: false,
+            artifact_dir: None,
             sandbox_info: None,
             source_profile: None,
             mcp_servers: Vec::new(),
@@ -3766,6 +3771,7 @@ mod tests {
             socket_path: Some(tmp.path().join("dummy.sock")),
             stored_acp_session_id: None,
             seed_history_replay: false,
+            artifact_dir: None,
             sandbox_info: None,
             source_profile: None,
             mcp_servers: Vec::new(),

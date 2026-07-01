@@ -22,8 +22,10 @@ import remarkGfm from "remark-gfm";
 
 import { ensureThemeLoaded, getHighlighter, langKeyForExt, loadLanguage } from "../../lib/highlighter";
 import { useShikiTheme } from "../../hooks/useShikiTheme";
-import { parseFileRef } from "../../lib/fileRef";
+import { parseFileRef, resolveArtifactUrl, resolveToRepoRelative } from "../../lib/fileRef";
 import { useAcpFileRef } from "./AcpFileRefContext";
+import { openArtifactInNewTab } from "../../lib/artifacts";
+import { ArtifactImage } from "./artifactMedia";
 
 interface Props {
   text: string;
@@ -73,20 +75,26 @@ export function Markdown({ text, smooth = false, breaks = false }: Props) {
         table: TableWithScroll,
         blockquote: Blockquote,
         a: TranscriptLink,
+        img: TranscriptImage,
       }}
     />
   );
 }
 
 /**
- * Transcript link. Two behaviors:
+ * Transcript link. Three behaviors:
  *
  *  - Local file references (e.g. Codex's `[app.ts](/repo/src/app.ts:42)`)
- *    are intercepted: clicking opens the file in the in-app diff/file
- *    viewer via the structured view file-ref handler, keeping the current
- *    `/session/<id>` route instead of navigating the tab to a dead
- *    filesystem path. Only active when a handler is provided and the
- *    href parses as a local file ref. See #1718.
+ *    that resolve to a known repo root are intercepted: clicking opens the
+ *    file in the in-app diff/file viewer via the structured view file-ref
+ *    handler, keeping the current `/session/<id>` route instead of
+ *    navigating the tab to a dead filesystem path. See #1718.
+ *  - A local file reference that resolves to no known repo root cannot be
+ *    opened in the dashboard: clicking it either dead-ends in a "not inside
+ *    this session's repo" toast or routes the tab to the SPA. Render it as
+ *    inert, selectable text rather than a link that lies about being
+ *    openable. Only decidable when a session is present to resolve against;
+ *    without one we keep the interception fallback. See #2587.
  *  - Everything else (docs, CI, repo links) keeps the same-tab-is-bad
  *    treatment from #1714: open in a new tab with the dashboard-standard
  *    safe rel (guards against tabnabbing), so following a link does not
@@ -97,22 +105,69 @@ export function Markdown({ text, smooth = false, breaks = false }: Props) {
  * non-intercepted link (or a middle-click / "open in new tab") still
  * behaves as before.
  */
-function TranscriptLink({ href, onClick, ...rest }: React.ComponentPropsWithoutRef<"a">) {
-  const { onOpenFileRef } = useAcpFileRef();
+function TranscriptLink({ href, onClick, children, ...rest }: React.ComponentPropsWithoutRef<"a">) {
+  const { onOpenFileRef, fileRefSession } = useAcpFileRef();
+  const ref = href ? parseFileRef(href) : null;
+  const artifactUrl = ref && fileRefSession ? resolveArtifactUrl(ref.path, fileRefSession) : null;
+
+  // A managed session artifact: openable via the authenticated route. Fetch
+  // it through the authed global fetch and open the blob so it works in
+  // token-auth mode where a bare new-tab navigation would miss the header.
+  if (artifactUrl) {
+    return (
+      <a
+        {...rest}
+        href={artifactUrl}
+        className="acp-artifact-link"
+        onClick={(e) => {
+          e.preventDefault();
+          void openArtifactInNewTab(artifactUrl);
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
+
+  if (ref && fileRefSession && !resolveToRepoRelative(ref.path, fileRefSession)) {
+    return <span className="acp-inert-path">{children}</span>;
+  }
 
   function handleClick(e: React.MouseEvent<HTMLAnchorElement>) {
-    if (href && onOpenFileRef) {
-      const ref = parseFileRef(href);
-      if (ref) {
-        e.preventDefault();
-        onOpenFileRef(ref);
-        return;
-      }
+    if (ref && onOpenFileRef) {
+      e.preventDefault();
+      onOpenFileRef(ref);
+      return;
     }
     onClick?.(e);
   }
 
-  return <a {...rest} href={href} onClick={handleClick} target="_blank" rel="noopener noreferrer" />;
+  return (
+    <a {...rest} href={href} onClick={handleClick} target="_blank" rel="noopener noreferrer">
+      {children}
+    </a>
+  );
+}
+
+/**
+ * Transcript image. An agent may embed a screenshot with markdown image
+ * syntax (`![alt](/aoe/artifacts/shot.png)`); map a path under a session
+ * artifact root to the authenticated route and render the fetched bytes
+ * inline. A local path we cannot serve renders as inert text rather than a
+ * broken image icon. Everything else keeps default <img> behavior. See #2587.
+ */
+function TranscriptImage({ src, alt, ...rest }: React.ComponentPropsWithoutRef<"img">) {
+  const { fileRefSession } = useAcpFileRef();
+  const ref = typeof src === "string" ? parseFileRef(src) : null;
+  const artifactUrl = ref && fileRefSession ? resolveArtifactUrl(ref.path, fileRefSession) : null;
+
+  if (artifactUrl) {
+    return <ArtifactImage url={artifactUrl} alt={typeof alt === "string" ? alt : undefined} />;
+  }
+  if (ref && fileRefSession && !resolveToRepoRelative(ref.path, fileRefSession)) {
+    return <span className="acp-inert-path">{alt || src}</span>;
+  }
+  return <img {...rest} src={src} alt={alt} />;
 }
 
 /**
