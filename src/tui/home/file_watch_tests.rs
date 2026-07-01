@@ -29,6 +29,14 @@ fn isolate_home(temp: &std::path::Path) {
     };
 }
 
+fn watcher_err(profile: Option<&str>, message: &str) -> super::WatcherInitError {
+    super::WatcherInitError {
+        profile: profile.map(str::to_owned),
+        kind: super::WatcherInitErrorKind::Watch(crate::file_watch::WatchErrorKind::Other),
+        message: message.to_owned(),
+    }
+}
+
 /// Poll `pred` every 25ms up to `deadline`. Avoids a fixed sleep that
 /// would either flake on slow CI or pad the test runtime on fast paths.
 async fn wait_until<F>(deadline: Duration, mut pred: F) -> bool
@@ -555,7 +563,7 @@ async fn rewire_after_profile_delete_watcher_warning_survives_recovery_edge() {
 /// is called with an unchanged profile set and no inode invalidation, the
 /// fast-path returns without running the install loop, and a previously
 /// latched `disk_watcher_init_error` must be preserved (the install loop
-/// is the only path that re-latches via `record_disk_watcher_init_failure`).
+/// is the only path that re-latches via `apply_disk_watcher_init_pass`).
 #[tokio::test]
 #[serial]
 async fn rewire_no_op_preserves_latched_disk_watcher_init_failure() {
@@ -579,7 +587,10 @@ async fn rewire_no_op_preserves_latched_disk_watcher_init_failure() {
     );
 
     view.reload_failure_state
-        .record_disk_watcher_init_failure("hv-noop", "simulated prior failure");
+        .apply_disk_watcher_init_pass(Some(watcher_err(
+            Some("hv-noop"),
+            "simulated prior failure",
+        )));
     assert!(
         view.reload_failure_state.has_any_failure(),
         "precondition: latch is set"
@@ -617,7 +628,10 @@ async fn rewire_disk_clears_stale_latch_when_failing_profile_is_removed() {
     .expect("HomeView::new");
 
     view.reload_failure_state
-        .record_disk_watcher_init_failure("ghost", "simulated subscribe failure");
+        .apply_disk_watcher_init_pass(Some(watcher_err(
+            Some("ghost"),
+            "simulated subscribe failure",
+        )));
     assert!(
         view.reload_failure_state.has_any_failure(),
         "precondition: latch is set, references the now-deleted profile"
@@ -653,7 +667,10 @@ async fn rewire_config_clears_stale_latch_when_failing_profile_is_removed() {
     .expect("HomeView::new");
 
     view.reload_failure_state
-        .record_config_watcher_init_failure(Some("ghost"), "simulated subscribe failure");
+        .apply_config_watcher_init_pass(Some(watcher_err(
+            Some("ghost"),
+            "simulated subscribe failure",
+        )));
     assert!(
         view.reload_failure_state.has_any_failure(),
         "precondition: latch is set, references the now-deleted profile"
@@ -691,7 +708,7 @@ async fn config_init_failure_survives_concurrent_disk_rewire_clear() {
     .expect("HomeView::new");
 
     view.reload_failure_state
-        .record_config_watcher_init_failure(None, "seed: config init failed");
+        .apply_config_watcher_init_pass(Some(watcher_err(None, "seed: config init failed")));
     assert!(
         view.reload_failure_state.has_any_failure(),
         "precondition: config latch is set"
@@ -757,8 +774,9 @@ fn reload_failure_state_dialog_body_aggregates_all_four_sources() {
     let mut state = super::ReloadFailureState::default();
     state.record_storage(&Err::<(), _>(anyhow::anyhow!("storage err")));
     state.record_config(&Err::<(), _>(anyhow::anyhow!("config err")));
-    state.record_disk_watcher_init_failure("agg-disk", "disk subscribe denied");
-    state.record_config_watcher_init_failure(None, "config subscribe denied");
+    state
+        .apply_disk_watcher_init_pass(Some(watcher_err(Some("agg-disk"), "disk subscribe denied")));
+    state.apply_config_watcher_init_pass(Some(watcher_err(None, "config subscribe denied")));
 
     let body = state.build_dialog_body();
     assert!(
@@ -783,22 +801,25 @@ fn reload_failure_state_dialog_body_aggregates_all_four_sources() {
 fn reload_failure_state_watcher_init_failure_lifecycle_is_per_source() {
     let mut state = super::ReloadFailureState::default();
 
-    state.record_disk_watcher_init_failure("life-disk", "first disk install failed");
+    state.apply_disk_watcher_init_pass(Some(watcher_err(
+        Some("life-disk"),
+        "first disk install failed",
+    )));
     assert!(
         state.has_unacknowledged_failure(),
         "disk_watcher_init_error contributes to has_any_failure"
     );
 
-    state.record_config_watcher_init_failure(None, "first config install failed");
+    state.apply_config_watcher_init_pass(Some(watcher_err(None, "first config install failed")));
     state.acknowledge_dialog();
 
-    state.clear_disk_watcher_init_failure();
+    state.apply_disk_watcher_init_pass(None);
     assert!(
         state.has_any_failure(),
         "clearing only the disk slot leaves the config slot latched"
     );
 
-    state.clear_config_watcher_init_failure();
+    state.apply_config_watcher_init_pass(None);
     assert!(
         !state.has_any_failure(),
         "clearing the last failing source removes all latches"
@@ -806,6 +827,178 @@ fn reload_failure_state_watcher_init_failure_lifecycle_is_per_source() {
     assert!(
         !state.has_unacknowledged_failure(),
         "clearing the last failing source resets the ack latch"
+    );
+}
+
+/// Regression test for #2112: identical disk-watcher-init failures
+/// across rewire passes must not re-arm the ack latch.
+#[test]
+fn reload_failure_ack_persists_across_identical_rewire_failures() {
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("p"), "permission denied")));
+    state.acknowledge_dialog();
+    assert!(!state.has_unacknowledged_failure());
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("p"), "permission denied")));
+    assert!(
+        !state.has_unacknowledged_failure(),
+        "identical failure across rewire passes must not re-arm the ack latch (#2112)"
+    );
+}
+
+/// A different classified error kind (new root cause with different
+/// remediation) is treated as a fresh failure and re-arms the dialog
+/// even when the source slot is unchanged.
+#[test]
+fn reload_failure_re_arms_when_error_kind_changes() {
+    use crate::file_watch::WatchErrorKind;
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_disk_watcher_init_pass(Some(super::WatcherInitError {
+        profile: Some("p".to_string()),
+        kind: super::WatcherInitErrorKind::Watch(WatchErrorKind::ResourceExhausted),
+        message: "EMFILE".to_string(),
+    }));
+    state.acknowledge_dialog();
+
+    state.apply_disk_watcher_init_pass(Some(super::WatcherInitError {
+        profile: Some("p".to_string()),
+        kind: super::WatcherInitErrorKind::Watch(WatchErrorKind::Permission),
+        message: "EACCES".to_string(),
+    }));
+    assert!(
+        state.has_unacknowledged_failure(),
+        "a changed error kind surfaces a fresh notification"
+    );
+}
+
+/// Defense-in-depth against `notify`-rs Display drift: the same
+/// classified failure on the same profile is ack-equal even when the
+/// formatted message string differs. Without this, a future
+/// `notify::Error` Display change (e.g. an added watch descriptor)
+/// would re-arm the dialog on the same persistent failure and the
+/// #2112 fix would silently regress.
+#[test]
+fn reload_failure_ack_persists_when_message_drifts_but_kind_is_stable() {
+    use crate::file_watch::WatchErrorKind;
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_disk_watcher_init_pass(Some(super::WatcherInitError {
+        profile: Some("p".to_string()),
+        kind: super::WatcherInitErrorKind::Watch(WatchErrorKind::ResourceExhausted),
+        message: "Too many open files (os error 24)".to_string(),
+    }));
+    state.acknowledge_dialog();
+
+    state.apply_disk_watcher_init_pass(Some(super::WatcherInitError {
+        profile: Some("p".to_string()),
+        kind: super::WatcherInitErrorKind::Watch(WatchErrorKind::ResourceExhausted),
+        message: "EMFILE: watch descriptor 8192 exhausted on /tmp/p".to_string(),
+    }));
+    assert!(
+        !state.has_unacknowledged_failure(),
+        "a drifted message with stable kind must not re-arm the ack latch"
+    );
+}
+
+/// A failure crossing the `Watch` <-> `Resolution` variant boundary
+/// is a genuine root-cause change (kernel-backend failure vs app-dir
+/// resolution failure have disjoint remediations) and re-arms the
+/// dialog. Locks the cross-variant arm of the ack-equality contract.
+#[test]
+fn reload_failure_re_arms_when_kind_crosses_watch_resolution_boundary() {
+    use crate::file_watch::WatchErrorKind;
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_config_watcher_init_pass(Some(super::WatcherInitError {
+        profile: None,
+        kind: super::WatcherInitErrorKind::Watch(WatchErrorKind::Backend),
+        message: "subscribe failed".to_string(),
+    }));
+    state.acknowledge_dialog();
+
+    state.apply_config_watcher_init_pass(Some(super::WatcherInitError {
+        profile: None,
+        kind: super::WatcherInitErrorKind::Resolution,
+        message: "app dir resolution failed".to_string(),
+    }));
+    assert!(
+        state.has_unacknowledged_failure(),
+        "a kind transition between Watch and Resolution surfaces a fresh notification"
+    );
+}
+
+/// Profile name is part of the failure's ack-identity, so a relocation
+/// re-arms the dialog under stable error content.
+#[test]
+fn reload_failure_re_arms_when_profile_changes() {
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("a"), "denied")));
+    state.acknowledge_dialog();
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("b"), "denied")));
+    assert!(
+        state.has_unacknowledged_failure(),
+        "a failure relocating to a different profile re-arms the dialog"
+    );
+}
+
+/// A new failing source appearing during an already-acknowledged
+/// burst re-arms the dialog so the additional failure is surfaced.
+#[test]
+fn reload_failure_re_arms_when_new_source_joins_burst() {
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("p"), "denied")));
+    state.acknowledge_dialog();
+    assert!(!state.has_unacknowledged_failure());
+
+    state.apply_config_watcher_init_pass(Some(watcher_err(None, "denied")));
+    assert!(
+        state.has_unacknowledged_failure(),
+        "a NEW failing source during an acked burst surfaces a fresh notification"
+    );
+}
+
+/// When two sources are failing and the user has acknowledged, a
+/// same-content `apply_*_init_pass` on the unrelated slot must not
+/// re-arm the dialog. Locks per-source isolation of the ack semantics.
+#[test]
+fn reload_failure_ack_persists_when_only_other_source_clears_and_rerecords() {
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("p"), "disk denied")));
+    state.apply_config_watcher_init_pass(Some(watcher_err(None, "config denied")));
+    state.acknowledge_dialog();
+    assert!(!state.has_unacknowledged_failure());
+
+    state.apply_config_watcher_init_pass(Some(watcher_err(None, "config denied")));
+    assert!(
+        !state.has_unacknowledged_failure(),
+        "an unchanged adjacent-source rewire pass must not re-arm the ack latch"
+    );
+}
+
+/// A failure that fully clears and then later returns produces a fresh
+/// dialog even if its content is byte-identical to the previously
+/// acknowledged failure. Locks the recovery-then-refailure UX.
+#[test]
+fn reload_failure_re_arms_when_failure_fully_clears_then_returns() {
+    let mut state = super::ReloadFailureState::default();
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("p"), "EMFILE")));
+    state.acknowledge_dialog();
+    assert!(!state.has_unacknowledged_failure());
+
+    state.apply_disk_watcher_init_pass(None);
+    assert!(!state.has_any_failure(), "all sources cleared");
+
+    state.apply_disk_watcher_init_pass(Some(watcher_err(Some("p"), "EMFILE")));
+    assert!(
+        state.has_unacknowledged_failure(),
+        "a failure that fully cleared and then returned must surface a fresh dialog"
     );
 }
 

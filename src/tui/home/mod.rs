@@ -1198,10 +1198,10 @@ impl DiskWatchState {
             return;
         }
 
-        // Clear the latch ahead of the install loop. `record_disk_watcher_init_failure`
-        // re-latches it on any `subscribe_channel` Err below, so the latch
-        // reflects the outcome of this rewire pass.
-        reload_failure.clear_disk_watcher_init_failure();
+        // Buffer the install-loop outcome and apply it as one transition
+        // at the end of the pass: an identical failure recurring across
+        // rewires must not re-arm the ack latch (issue #2112).
+        let mut new_init_error: Option<WatcherInitError> = None;
 
         let to_remove: Vec<String> = prior
             .iter()
@@ -1291,10 +1291,15 @@ impl DiskWatchState {
                         error = %e,
                         "subscribe_channel failed; falling back to 5s heartbeat for this profile"
                     );
-                    reload_failure.record_disk_watcher_init_failure(name, e.to_string());
+                    new_init_error = Some(WatcherInitError {
+                        profile: Some(name.clone()),
+                        kind: WatcherInitErrorKind::Watch(e.kind()),
+                        message: e.to_string(),
+                    });
                 }
             }
         }
+        reload_failure.apply_disk_watcher_init_pass(new_init_error);
         tracing::debug!(
             target: "tui.file_watch",
             added = ?to_add,
@@ -1447,10 +1452,10 @@ impl ConfigWatchState {
             return;
         }
 
-        // Clear the latch ahead of the install loop. `record_config_watcher_init_failure`
-        // re-latches it on any `subscribe_channel` Err below, so the latch
-        // reflects the outcome of this rewire pass.
-        reload_failure.clear_config_watcher_init_failure();
+        // Buffer the install-loop outcome and apply it as one transition
+        // at the end of the pass: an identical failure recurring across
+        // rewires must not re-arm the ack latch (issue #2112).
+        let mut new_init_error: Option<WatcherInitError> = None;
 
         if global_needs_install {
             match crate::session::get_app_dir() {
@@ -1502,7 +1507,11 @@ impl ConfigWatchState {
                                 "global config subscribe_channel failed; \
                                  falling back to settings-close + profile-switch reload"
                             );
-                            reload_failure.record_config_watcher_init_failure(None, e.to_string());
+                            new_init_error = Some(WatcherInitError {
+                                profile: None,
+                                kind: WatcherInitErrorKind::Watch(e.kind()),
+                                message: e.to_string(),
+                            });
                         }
                     }
                 }
@@ -1512,10 +1521,11 @@ impl ConfigWatchState {
                         error = %e,
                         "skipping global config subscribe; app dir resolution failed"
                     );
-                    reload_failure.record_config_watcher_init_failure(
-                        None,
-                        format!("app dir resolution failed: {e}"),
-                    );
+                    new_init_error = Some(WatcherInitError {
+                        profile: None,
+                        kind: WatcherInitErrorKind::Resolution,
+                        message: format!("app dir resolution failed: {e}"),
+                    });
                 }
             }
         }
@@ -1598,10 +1608,15 @@ impl ConfigWatchState {
                         "config subscribe_channel failed; \
                          falling back to settings-close + profile-switch reload for this profile"
                     );
-                    reload_failure.record_config_watcher_init_failure(Some(name), e.to_string());
+                    new_init_error = Some(WatcherInitError {
+                        profile: Some(name.clone()),
+                        kind: WatcherInitErrorKind::Watch(e.kind()),
+                        message: e.to_string(),
+                    });
                 }
             }
         }
+        reload_failure.apply_config_watcher_init_pass(new_init_error);
         if !to_add.is_empty() || !to_remove.is_empty() {
             tracing::debug!(
                 target: "tui.file_watch",
@@ -1623,13 +1638,38 @@ impl ConfigWatchState {
     }
 }
 
-/// Latched record of a watcher init failure. The disk slot always carries
-/// `Some(profile)`; the config slot carries `None` for the global config
-/// watch and `Some(profile)` per-profile.
-pub(super) struct WatcherInitError {
-    profile: Option<String>,
-    message: String,
+/// Stable identity for a watcher-init failure across rewire passes.
+/// The `notify` crate's Display string is not part of its stability
+/// guarantee; ack-equality is keyed on the structured kind so a
+/// future Display drift does not silently re-arm the dialog on the
+/// same persistent failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WatcherInitErrorKind {
+    Watch(crate::file_watch::WatchErrorKind),
+    /// The app-dir resolution path errored before a subscribe attempt
+    /// could be made. Distinct from any `Watch(_)` variant so a
+    /// resolution failure followed by a backend failure surfaces as a
+    /// content change.
+    Resolution,
 }
+
+/// Latched record of a watcher-init failure. The disk slot always carries
+/// `Some(profile)`; the config slot carries `None` for the global config
+/// watch and `Some(profile)` per-profile. Equality is keyed on
+/// `(profile, kind)`; `message` is display-only.
+pub(super) struct WatcherInitError {
+    pub(super) profile: Option<String>,
+    pub(super) kind: WatcherInitErrorKind,
+    pub(super) message: String,
+}
+
+impl PartialEq for WatcherInitError {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile == other.profile && self.kind == other.kind
+    }
+}
+
+impl Eq for WatcherInitError {}
 
 /// Per-tick reload failure tracking. Tick-driven reload paths in
 /// `App::run` (heartbeat `reload()`, watcher-driven `reload_storage_only()`,
@@ -1716,49 +1756,45 @@ impl ReloadFailureState {
         }
     }
 
-    pub(super) fn record_disk_watcher_init_failure(
-        &mut self,
-        profile: &str,
-        message: impl Into<String>,
-    ) {
-        let was_clear = self.disk_watcher_init_error.is_none();
-        self.disk_watcher_init_error = Some(WatcherInitError {
-            profile: Some(profile.to_owned()),
-            message: message.into(),
-        });
-        if was_clear {
-            self.dialog_acknowledged = false;
-        }
-    }
-
-    pub(super) fn clear_disk_watcher_init_failure(&mut self) {
-        if self.disk_watcher_init_error.is_some() {
-            self.disk_watcher_init_error = None;
-            if !self.has_any_failure() {
+    /// Apply the outcome of a disk-watch rewire pass as one transition.
+    /// `new` is the per-pass install-loop result (`Some` if any profile's
+    /// `subscribe_channel` returned `Err`, `None` otherwise). The latch
+    /// is re-armed only on a content change: a same-as-before failure
+    /// inside an acknowledged burst is treated as a no-op so the user
+    /// is not re-notified every rewire pass while the underlying
+    /// failure persists. A clean transition to `None` resets the ack
+    /// latch when no other source remains failing, so a later identical
+    /// failure surfaces a fresh dialog.
+    pub(super) fn apply_disk_watcher_init_pass(&mut self, new: Option<WatcherInitError>) {
+        let was = std::mem::replace(&mut self.disk_watcher_init_error, new);
+        match (&was, &self.disk_watcher_init_error) {
+            (Some(prev), Some(curr)) if prev == curr => {}
+            (None, None) => {}
+            (Some(_), None) => {
+                if !self.has_any_failure() {
+                    self.dialog_acknowledged = false;
+                }
+            }
+            (_, Some(_)) => {
                 self.dialog_acknowledged = false;
             }
         }
     }
 
-    pub(super) fn record_config_watcher_init_failure(
-        &mut self,
-        profile: Option<&str>,
-        message: impl Into<String>,
-    ) {
-        let was_clear = self.config_watcher_init_error.is_none();
-        self.config_watcher_init_error = Some(WatcherInitError {
-            profile: profile.map(str::to_owned),
-            message: message.into(),
-        });
-        if was_clear {
-            self.dialog_acknowledged = false;
-        }
-    }
-
-    pub(super) fn clear_config_watcher_init_failure(&mut self) {
-        if self.config_watcher_init_error.is_some() {
-            self.config_watcher_init_error = None;
-            if !self.has_any_failure() {
+    /// Apply the outcome of a config-watch rewire pass as one transition.
+    /// See [`Self::apply_disk_watcher_init_pass`] for the latch semantics;
+    /// the two slots are independent.
+    pub(super) fn apply_config_watcher_init_pass(&mut self, new: Option<WatcherInitError>) {
+        let was = std::mem::replace(&mut self.config_watcher_init_error, new);
+        match (&was, &self.config_watcher_init_error) {
+            (Some(prev), Some(curr)) if prev == curr => {}
+            (None, None) => {}
+            (Some(_), None) => {
+                if !self.has_any_failure() {
+                    self.dialog_acknowledged = false;
+                }
+            }
+            (_, Some(_)) => {
                 self.dialog_acknowledged = false;
             }
         }
