@@ -241,6 +241,17 @@ impl Vs16Widener {
         }
     }
 
+    /// Re-anchor the tracked cursor column and width to the parser's actual
+    /// state. Called before each live chunk so the last-column gate reflects the
+    /// post-seed cursor and any resize, and so drift from escapes the tracker
+    /// does not model cannot accumulate across chunks. `last`/`incomplete` are
+    /// stream-level and left untouched so a base/VS16 pair split across two
+    /// socket reads still pairs.
+    fn resync(&mut self, col: u16, cols: u16) {
+        self.cols = cols.max(1);
+        self.col = col.min(self.cols - 1);
+    }
+
     fn process(&mut self, input: &[u8]) -> Vec<u8> {
         let mut data = std::mem::take(&mut self.incomplete);
         data.extend_from_slice(input);
@@ -828,8 +839,15 @@ impl VtChannel {
                             while !seeded.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
                                 std::thread::sleep(Duration::from_millis(1));
                             }
-                            let widened = vs16.process(&buf[..n]);
                             if let Ok(mut p) = parser.lock() {
+                                // Anchor the widener to the parser's live cursor
+                                // and width before widening, so the last-column
+                                // gate is correct after the seed positions the
+                                // cursor or a resize changes the width.
+                                let (_, col) = p.screen().cursor_position();
+                                let (_, cols_now) = p.screen().size();
+                                vs16.resync(col, cols_now);
+                                let widened = vs16.process(&buf[..n]);
                                 p.process(&widened);
                                 app_cursor
                                     .store(p.screen().application_cursor(), Ordering::Relaxed);
@@ -1142,6 +1160,27 @@ mod tests {
         let s = p.screen();
         // 😀 occupies cols 0-1 (wide), the bracket follows at col 2.
         assert_eq!(s.cell(0, 2).map(|c| c.contents()), Some("["));
+    }
+
+    #[test]
+    fn vs16_resync_drives_the_margin_gate() {
+        // After a resize/seed the widener is re-anchored from the parser. A base
+        // landing on the last column of the new width must not be nudged...
+        let mut narrow = Vs16Widener::new(20);
+        narrow.resync(5, 6);
+        let out = narrow.process("\u{2764}\u{fe0f}".as_bytes());
+        assert!(
+            !out.windows(3).any(|w| w == b"\x1b[C"),
+            "cursor-forward injected at the last column: {out:?}"
+        );
+        // ...but mid-row on the new width it is.
+        let mut wide = Vs16Widener::new(6);
+        wide.resync(0, 20);
+        let out = wide.process("\u{2764}\u{fe0f}".as_bytes());
+        assert!(
+            out.windows(3).any(|w| w == b"\x1b[C"),
+            "cursor-forward missing mid-row: {out:?}"
+        );
     }
 
     #[test]
