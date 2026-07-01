@@ -75,6 +75,20 @@ describe("wrapLine", () => {
     expect(rows.length).toBe(2);
   });
 
+  it("counts a base + VS16 emoji as two cells and never splits the pair", () => {
+    // heart U+2764 + VS16 U+FE0F renders in emoji presentation, width 2
+    // (aoe #2590); like a wide char it wraps whole at cols=2.
+    const rows = wrapLine([seg("a\u2764\uFE0F\u2764\uFE0F")], 2);
+    expect(rows.map((r) => lineText(r))).toEqual(["a", "\u2764\uFE0F", "\u2764\uFE0F"]);
+  });
+
+  it("leaves a bare width-1 symbol as one cell without VS16", () => {
+    // Without VS16 the heart is text-presentation width 1, so "a\u2764b" fits 3
+    // columns and must not be over-widened.
+    const line = [seg("a\u2764b")];
+    expect(wrapLine(line, 3)).toEqual([line]);
+  });
+
   it("keeps combining marks attached to their base character", () => {
     // e + combining acute (zero cells) + "x" is 2 cells; at cols=2 the
     // line is identity, and at cols=1 the mark stays with the e.

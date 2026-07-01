@@ -46,10 +46,19 @@ function cellWidth(codePoint: string): number {
   return WIDE.test(codePoint) ? 2 : 1;
 }
 
+// A width-1 base followed by U+FE0F (VS16) renders in emoji presentation and
+// takes two cells, matching tmux and the pane grid (aoe issue #2590). VS16
+// itself stays zero-width; the second cell is folded onto the base.
+function cellWidthWithNext(ch: string, next: string | undefined): number {
+  const w = cellWidth(ch);
+  return w === 1 && next === "\uFE0F" ? 2 : w;
+}
+
 function textWidth(text: string): number {
   if (ASCII_PRINTABLE_ONLY.test(text)) return text.length;
+  const cps = [...text];
   let width = 0;
-  for (const ch of text) width += cellWidth(ch);
+  for (let i = 0; i < cps.length; i++) width += cellWidthWithNext(cps[i]!, cps[i + 1]);
   return width;
 }
 
@@ -76,8 +85,10 @@ export function wrapLine(line: AnsiSegment[], cols: number): AnsiSegment[][] {
         chunk = "";
       }
     };
-    for (const ch of seg.text) {
-      const w = cellWidth(ch);
+    const cps = [...seg.text];
+    for (let i = 0; i < cps.length; i++) {
+      const ch = cps[i]!;
+      const w = cellWidthWithNext(ch, cps[i + 1]);
       // A wide char that doesn't fit wraps whole (terminals leave the
       // last cell empty); zero-width marks stay with their base char.
       if (used + w > cols && used > 0) {
