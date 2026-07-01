@@ -621,8 +621,16 @@ fn row_to_ansi(screen: &vt100::Screen, row: u16, cols: u16) -> String {
             // `widen_vs16` reserves a trailing blank column for a base+VS16
             // emoji (width 1 to vt100, two cells on a real terminal). Own both
             // columns so that reserved blank is not serialised as a stray space
-            // and the following cell keeps its column.
-            if advance == 1 && cell.contents().ends_with('\u{fe0f}') {
+            // and the following cell keeps its column, but only when that column
+            // really is the reserved blank: a later absolute write or styled
+            // fill there must still be emitted, not swallowed.
+            if advance == 1
+                && cell.contents().ends_with('\u{fe0f}')
+                && col + 1 < last
+                && screen
+                    .cell(row, col + 1)
+                    .is_some_and(|next| !next.has_contents() && !cell_has_style(next))
+            {
                 advance = 2;
             }
         } else {
@@ -1134,6 +1142,17 @@ mod tests {
         let s = p.screen();
         // 😀 occupies cols 0-1 (wide), the bracket follows at col 2.
         assert_eq!(s.cell(0, 2).map(|c| c.contents()), Some("["));
+    }
+
+    #[test]
+    fn vs16_does_not_swallow_real_content_in_the_next_cell() {
+        // If a later write puts real content directly after a VS16 emoji (no
+        // reserved blank, e.g. bytes that never went through the widener),
+        // row_to_ansi must still emit it rather than treating it as the blank.
+        let mut p = vt100::Parser::new(3, 20, 0);
+        p.process("\u{2764}\u{fe0f}X".as_bytes());
+        let (content, _) = grid_content(&mut p, 3, 20, 3);
+        assert!(content.contains("\u{2764}\u{fe0f}X"), "row: {content:?}");
     }
 
     #[test]
