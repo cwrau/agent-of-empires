@@ -2270,8 +2270,11 @@ impl HomeView {
         // Disk subscriptions stay scoped to the loaded storages: in
         // single-profile mode (`aoe --profile X`) the user opted into
         // exactly that profile's instance state, so we don't watch
-        // sessions.json/groups.json for unrelated profiles.
-        let initial_disk_profiles: Vec<String> = view.storages.keys().cloned().collect();
+        // sessions.json/groups.json for unrelated profiles. Sorted so
+        // the install-loop's last-write-wins target stays stable across
+        // HashMap rehash between rewire ticks (see #2584).
+        let mut initial_disk_profiles: Vec<String> = view.storages.keys().cloned().collect();
+        initial_disk_profiles.sort();
         view.rewire_disk_subscriptions(&initial_disk_profiles);
         // Config subscriptions are intentionally asymmetric: even in
         // single-profile mode, peer edits to ANY profile's config.toml
@@ -2324,7 +2327,9 @@ impl HomeView {
                     error = %error,
                     "list_profiles failed during reload_storage_only; reusing loaded storages for watcher rewires"
                 );
-                self.storages.keys().cloned().collect()
+                let mut keys: Vec<String> = self.storages.keys().cloned().collect();
+                keys.sort();
+                keys
             }
         };
 
@@ -2339,7 +2344,8 @@ impl HomeView {
         // so the unconditional call is a no-op on a stable profile set.
         self.rewire_config_subscriptions(&current_profiles);
         if self.active_profile.is_some() {
-            let active_only: Vec<String> = self.storages.keys().cloned().collect();
+            let mut active_only: Vec<String> = self.storages.keys().cloned().collect();
+            active_only.sort();
             self.rewire_disk_subscriptions(&active_only);
         } else {
             self.rewire_disk_subscriptions(&current_profiles);
@@ -2490,7 +2496,9 @@ impl HomeView {
         match crate::session::list_profiles() {
             Ok(profiles) => {
                 let disk_targets: Vec<String> = if self.active_profile.is_some() {
-                    self.storages.keys().cloned().collect()
+                    let mut keys: Vec<String> = self.storages.keys().cloned().collect();
+                    keys.sort();
+                    keys
                 } else {
                     profiles.clone()
                 };
@@ -4290,7 +4298,9 @@ impl HomeView {
                     error = %e,
                     "list_profiles failed during switch_profile; reusing loaded storages for config rewire"
                 );
-                self.storages.keys().cloned().collect()
+                let mut keys: Vec<String> = self.storages.keys().cloned().collect();
+                keys.sort();
+                keys
             }
         };
         self.rewire_config_subscriptions(&config_targets);
