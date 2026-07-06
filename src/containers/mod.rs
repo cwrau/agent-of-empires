@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn probe_err_is_unknown() {
-        let r = Err(error::DockerError::RemoveFailed("inspect exit 1".into()));
+        let r = Err(error::DockerError::InspectFailed("inspect exit 1".into()));
         assert!(matches!(classify_running_probe(r), Probe::Unknown(_)));
     }
 

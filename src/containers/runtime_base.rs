@@ -102,6 +102,19 @@ pub(crate) struct RuntimeBase {
     /// sites (#2596 follow-up). Case sensitivity is intentional; every
     /// runtime's daemon-down message has stable capitalization at the source.
     pub daemon_down_markers: &'static [&'static str],
+    /// Case-insensitive stderr substrings that identify a "permission
+    /// denied" error (typically Linux docker/podman socket without
+    /// docker-group membership). Structural parallel to `not_found_markers`
+    /// and `daemon_down_markers` (#2656 follow-up to #2596). Isolation is
+    /// intentionally asymmetric: Docker's marker is tightly scoped to the
+    /// canonical "docker daemon socket" wording, so cross-runtime bleed is
+    /// prevented by construction there; Podman and Apple use the broad
+    /// "permission denied" placeholder pending real-fixture capture, which
+    /// does bleed across runtimes but preserves pre-#2656 behavior. Case
+    /// handling mirrors [`Self::is_not_found`]: OS-emitted "permission
+    /// denied" strings vary in capitalization across kernel versions and
+    /// locales, so case-fold matching is safest.
+    pub permission_denied_markers: &'static [&'static str],
 }
 
 impl RuntimeBase {
@@ -120,6 +133,15 @@ impl RuntimeBase {
         // of this message across every Docker OS variant (macOS Desktop, Linux
         // CE, Windows Desktop).
         daemon_down_markers: &["Cannot connect to the Docker daemon"],
+        // Docker's canonical Linux socket-permission wording, per the
+        // post-install docs: "Got permission denied while trying to connect
+        // to the Docker daemon socket at unix:///var/run/docker.sock ...".
+        // The "docker daemon socket" clause is specific enough to exclude
+        // unrelated permission errors (image policy, volume mount, registry
+        // auth) that a broad "permission denied" match would misclassify.
+        permission_denied_markers: &[
+            "permission denied while trying to connect to the docker daemon socket",
+        ],
     };
 
     pub const APPLE_CONTAINER: Self = Self {
@@ -146,6 +168,12 @@ impl RuntimeBase {
         // log actionability, not correctness. Replace with a captured
         // fixture when available.
         daemon_down_markers: &["connect to container daemon"],
+        // Placeholder: Apple's `container` CLI permission-denied wording is
+        // not captured in this repo. The bare "permission denied" match
+        // preserves the pre-#2656 broad-inline-substring behavior for this
+        // runtime; tighten to an Apple-specific pattern once captured to
+        // prevent future cross-runtime substring bleed.
+        permission_denied_markers: &["permission denied"],
     };
 
     pub const PODMAN: Self = Self {
@@ -169,6 +197,13 @@ impl RuntimeBase {
         // - "Cannot connect to Podman." fires on Podman Desktop / machine
         //   mode (macOS / Windows), when the VM is stopped.
         daemon_down_markers: &["connect to Podman socket", "Cannot connect to Podman."],
+        // Placeholder: Podman's socket-permission wording is not captured
+        // in this repo. In practice Podman surfaces the underlying Linux
+        // socket permission error, which contains "permission denied" (e.g.
+        // "unable to connect to Podman socket: dial unix ...: connect:
+        // permission denied"). Matches the pre-#2656 broad-inline-substring
+        // behavior; tighten to a Podman-specific pattern once captured.
+        permission_denied_markers: &["permission denied"],
     };
 
     /// Whether `stderr` from a container inspect indicates the runtime's
@@ -176,6 +211,17 @@ impl RuntimeBase {
     /// per-runtime; see [`Self::daemon_down_markers`] rationale.
     pub fn is_daemon_down(&self, stderr: &str) -> bool {
         self.daemon_down_markers.iter().any(|m| stderr.contains(m))
+    }
+
+    /// Whether `stderr` indicates a permission-denied error for this
+    /// runtime's socket / daemon. Case-insensitive to tolerate wording
+    /// drift across kernel versions and locales, per
+    /// [`Self::permission_denied_markers`] rationale.
+    pub fn is_permission_denied(&self, stderr: &str) -> bool {
+        let lower = stderr.to_lowercase();
+        self.permission_denied_markers
+            .iter()
+            .any(|m| lower.contains(m))
     }
 
     /// Whether `stderr` from a remove/stop indicates the container did not
@@ -206,15 +252,23 @@ impl RuntimeBase {
         // Mirror run_create's daemon-down / permission-denied sniff so the
         // Probe::Unknown(e) warn logs at gate sites show the actionable
         // DaemonNotRunning / PermissionDenied Display messages rather than
-        // a raw stderr wrapped in InspectFailed. Daemon-down markers live
-        // per-runtime on Self (parallel to `not_found_markers`) so each
-        // runtime only matches its own wording and cross-runtime bleed is
-        // impossible by construction.
+        // a raw stderr wrapped in InspectFailed. Markers live per-runtime on
+        // Self (parallel to `not_found_markers`): daemon-down is fully
+        // isolated across runtimes by construction, permission-denied is
+        // asymmetric because Podman and Apple placeholders intentionally
+        // bleed pending real-fixture capture (see field docs for details).
+        //
+        // Order matters: permission-denied is checked BEFORE daemon-down
+        // because Podman's socket-permission stderr ("unable to connect to
+        // Podman socket: ... connect: permission denied") also matches
+        // Podman's daemon_down_markers ("connect to Podman socket"). The
+        // permission-denied path is the more specific classification, so it
+        // must win when both markers match the same stderr.
+        if self.is_permission_denied(stderr) {
+            return Err(DockerError::PermissionDenied);
+        }
         if self.is_daemon_down(stderr) {
             return Err(DockerError::DaemonNotRunning);
-        }
-        if stderr.to_lowercase().contains("permission denied") {
-            return Err(DockerError::PermissionDenied);
         }
         Err(DockerError::InspectFailed(sanitize_stderr(stderr)))
     }
@@ -439,10 +493,10 @@ impl RuntimeBase {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::debug!(target: "containers.runtime", "stderr: {}", stderr);
-            if stderr.contains("permission denied") {
+            if self.is_permission_denied(&stderr) {
                 return Err(DockerError::PermissionDenied);
             }
-            if stderr.contains("Cannot connect to the Docker daemon") {
+            if self.is_daemon_down(&stderr) {
                 return Err(DockerError::DaemonNotRunning);
             }
             if stderr.contains("No such image") || stderr.contains("Unable to find image") {
@@ -718,16 +772,68 @@ mod tests {
 
     #[test]
     fn inspect_permission_denied_stderr_maps_to_permission_denied() {
-        // Docker's "Got permission denied while trying to connect to the
-        // Docker daemon socket" (typical on Linux without docker-group
-        // membership) surfaces the actionable PermissionDenied variant
-        // rather than opaque InspectFailed. Matches run_create's sniff.
-        let stderr = "Got permission denied while trying to connect to the Docker daemon socket \
-                      at unix:///var/run/docker.sock";
+        // Docker's canonical Linux socket-permission wording ("Got permission
+        // denied while trying to connect to the Docker daemon socket") surfaces
+        // the actionable PermissionDenied variant on all three runtimes via
+        // per-runtime `permission_denied_markers`. Podman and Apple use the
+        // broader "permission denied" placeholder pending real-fixture capture,
+        // so the OS-level socket error text matches on those runtimes too.
+        let docker_stderr =
+            "Got permission denied while trying to connect to the Docker daemon socket \
+                             at unix:///var/run/docker.sock";
         assert!(matches!(
-            RuntimeBase::DOCKER.classify_inspect_failure(stderr),
+            RuntimeBase::DOCKER.classify_inspect_failure(docker_stderr),
             Err(DockerError::PermissionDenied)
         ));
+
+        let podman_stderr = "Error: unable to connect to Podman socket: dial unix \
+                             /run/user/1000/podman/podman.sock: connect: permission denied";
+        assert!(matches!(
+            RuntimeBase::PODMAN.classify_inspect_failure(podman_stderr),
+            Err(DockerError::PermissionDenied)
+        ));
+
+        // Apple placeholder: no captured wording, but the broad marker still
+        // routes generic Linux socket permission errors to PermissionDenied.
+        // TODO: replace with captured Apple `container` CLI permission
+        // stderr once a real macOS 26 fixture is available (cf. #2655 for
+        // the parallel Apple daemon-down fixture follow-up).
+        let apple_stderr = "Error: permission denied accessing container socket";
+        assert!(matches!(
+            RuntimeBase::APPLE_CONTAINER.classify_inspect_failure(apple_stderr),
+            Err(DockerError::PermissionDenied)
+        ));
+    }
+
+    #[test]
+    fn is_permission_denied_cross_runtime_isolation_is_asymmetric() {
+        // Companion to is_daemon_down_is_cross_runtime_isolated, but the
+        // invariant tested here is asymmetric by design: Docker's marker is
+        // tightened to the canonical "docker daemon socket" clause, so it
+        // isolates cleanly; Podman and Apple use the broad "permission
+        // denied" placeholder pending real-fixture capture and thus stay
+        // permissive. The asymmetric name flags that this test does NOT
+        // assert full three-way isolation like its daemon-down sibling.
+        let docker_pd = "Got permission denied while trying to connect to the Docker daemon socket";
+        assert!(RuntimeBase::DOCKER.is_permission_denied(docker_pd));
+        // Podman and Apple ALSO match "permission denied" (their broader
+        // placeholders): this is the pre-#2656 behavior preserved intentionally.
+        assert!(RuntimeBase::PODMAN.is_permission_denied(docker_pd));
+        assert!(RuntimeBase::APPLE_CONTAINER.is_permission_denied(docker_pd));
+
+        // Conversely, a Podman-only wording that lacks Docker's specific
+        // clause MUST NOT match Docker's tight marker.
+        let podman_only = "Error: unable to connect to Podman socket: connect: permission denied";
+        assert!(!RuntimeBase::DOCKER.is_permission_denied(podman_only));
+        assert!(RuntimeBase::PODMAN.is_permission_denied(podman_only));
+
+        // Docker's tightening promise: unrelated "permission denied" errors
+        // (image policy, registry auth, volume mount) that a broad substring
+        // match would misclassify MUST be rejected. Locks the tightening
+        // against future regressions ("just one more case, it will be fine").
+        let policy_denied =
+            "docker: Error response from daemon: pull access denied: permission denied by policy";
+        assert!(!RuntimeBase::DOCKER.is_permission_denied(policy_denied));
     }
 
     #[test]
