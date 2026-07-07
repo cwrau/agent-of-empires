@@ -210,7 +210,11 @@ pub fn edit_worktree_workdir(
             req.current_path.to_path_buf(),
         ));
     }
-    if branch_changes && git.branch_exists(&new_branch) {
+    // #2653 fail-closed gate: swallowing `Err` as "absent" would
+    // clobber a branch that actually existed or explode inside
+    // `rename_branch`. See `GitWorktree::branch_exists` docstring
+    // for the tri-state contract.
+    if branch_changes && git.branch_exists(&new_branch)? {
         return Err(WorktreeEditError::BranchExists(new_branch));
     }
     if path_changes && new_path.exists() {

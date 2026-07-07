@@ -1066,14 +1066,38 @@ impl GitWorktree {
     }
 
     /// Whether a local branch `refs/heads/<branch>` exists in this repo.
-    pub fn branch_exists(&self, branch: &str) -> bool {
+    ///
+    /// Tri-state result mirroring [`std::path::Path::try_exists`]
+    /// semantics: `Ok(true)` present, `Ok(false)` absent (`show-ref
+    /// --quiet` exit 1), `Err(_)` the check itself failed (spawn error,
+    /// `git` missing on PATH, I/O error). Callers must fail closed on
+    /// `Err` and refuse whatever mutation they were gating on the answer:
+    /// swallowing check failures as "absent" was the shape of #2653, and
+    /// the same class the container surface closed in #2596 / #2652 with
+    /// `Probe::Unknown`.
+    ///
+    /// Unlike the container surface, no per-cause classification is done
+    /// here (no `DaemonNotRunning` / `PermissionDenied` split): `git`
+    /// subprocess I/O errors are narrow enough that the underlying
+    /// `io::Error` `Display` is passed through as-is, matching the
+    /// wording style of the sibling `WorktreeCommandFailed` sites
+    /// (`git branch -d`, `git branch -m`, `git worktree move`).
+    pub fn branch_exists(&self, branch: &str) -> Result<bool> {
         let refname = format!("refs/heads/{branch}");
+        // Shells out via `run_git` rather than reusing the libgit2 handle
+        // opened in `GitWorktree::new`: matches the sibling helpers
+        // (`delete_branch`, `rename_branch`, `move_worktree`) which are
+        // all subprocess-driven for consistent stderr / exit-code
+        // semantics. The subprocess is why `Err(_)` is a real possibility
+        // here even though the repo is already open.
         match super::command::run_git(
             &self.repo_path,
             ["show-ref", "--verify", "--quiet", &refname],
         ) {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+            Ok(output) => Ok(output.status.success()),
+            Err(e) => Err(GitError::WorktreeCommandFailed(format!(
+                "git show-ref --verify {refname}: {e}"
+            ))),
         }
     }
 

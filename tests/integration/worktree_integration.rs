@@ -314,7 +314,7 @@ fn edit_workdir_moves_dir_and_optionally_renames_branch() {
     assert_eq!(outcome.new_branch, None);
     assert!(!old_path.exists());
     assert!(fresh_path.exists());
-    assert!(git_wt.branch_exists("old-name"));
+    assert!(git_wt.branch_exists("old-name").unwrap());
 
     // Branch rename opted in: directory moves and branch is renamed.
     let outcome2 = edit_worktree_workdir(WorktreeEditRequest {
@@ -328,8 +328,8 @@ fn edit_workdir_moves_dir_and_optionally_renames_branch() {
     assert_eq!(outcome2.new_branch.as_deref(), Some("renamed"));
     assert!(!fresh_path.exists());
     assert!(renamed_path.exists());
-    assert!(git_wt.branch_exists("renamed"));
-    assert!(!git_wt.branch_exists("old-name"));
+    assert!(git_wt.branch_exists("renamed").unwrap());
+    assert!(!git_wt.branch_exists("old-name").unwrap());
 }
 
 // Tied workdir/title (#1927)
@@ -387,7 +387,7 @@ fn tied_rename_moves_dir_to_title_leaf_without_touching_branch() {
     assert!(!old_path.exists());
     assert!(new_path.exists());
     // Branch is never swept in by a tied title rename.
-    assert!(git_wt.branch_exists("byzantines"));
+    assert!(git_wt.branch_exists("byzantines").unwrap());
 }
 
 #[test]
@@ -459,7 +459,7 @@ fn edit_workdir_rejects_invalid_cases_without_partial_changes() {
     .unwrap_err();
     assert!(matches!(err, WorktreeEditError::BranchExists(_)));
     assert!(old_path.exists());
-    assert!(git_wt.branch_exists("aaa"));
+    assert!(git_wt.branch_exists("aaa").unwrap());
 
     // Unmanaged worktrees cannot be edited.
     let unmanaged = WorktreeInfo {
