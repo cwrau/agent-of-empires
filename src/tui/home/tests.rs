@@ -2541,6 +2541,53 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     TestEnv { _temp: temp, view }
 }
 
+/// Trashing and restoring a session through the view's own actions keeps the
+/// group header count in step with the rows, since both are rebuilt from the
+/// same predicate. Guards against the count and the visible rows drifting.
+#[test]
+#[serial]
+fn group_header_count_tracks_trash_and_restore() {
+    let mut env = create_test_env_with_group_sessions();
+    env.view.trashed_section_collapsed = false;
+
+    let work_count = |env: &TestEnv| -> usize {
+        env.view
+            .flat_items
+            .iter()
+            .find_map(|i| match i {
+                Item::Group {
+                    path,
+                    session_count,
+                    ..
+                } if path == "work" => Some(*session_count),
+                _ => None,
+            })
+            .expect("work group header present")
+    };
+
+    // "work" holds two direct sessions plus one in the nested "work/projects".
+    assert_eq!(work_count(&env), 3);
+
+    let target = env
+        .view
+        .instances
+        .iter()
+        .find(|i| i.group_path == "work")
+        .map(|i| i.id.clone())
+        .expect("a direct work session");
+
+    env.view.trash_session_by_id(&target);
+    assert_eq!(
+        work_count(&env),
+        2,
+        "trashed session drops out of the count"
+    );
+
+    env.view.select_session_by_id(&target);
+    env.view.toggle_archive_at_cursor().unwrap();
+    assert_eq!(work_count(&env), 3, "restored session returns to the count");
+}
+
 #[test]
 #[serial]
 fn test_group_has_managed_worktrees() {
