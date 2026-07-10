@@ -796,14 +796,13 @@ fn save_recent_projects(store: &RecentProjects) -> Result<()> {
 mod tests {
     use super::*;
     use crate::file_watch::{FileMatcher, FileWatchService, WatchSpec};
+    use crate::session::test_support::{isolate_app_dir_at, AppDirGuard};
     use crate::session::GroupTree;
     use serial_test::serial;
     use tempfile::tempdir;
 
-    fn setup_test_home(temp: &std::path::Path) {
-        std::env::set_var("HOME", temp);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        std::env::set_var("XDG_CONFIG_HOME", temp.join(".config"));
+    fn setup_test_home(temp: &std::path::Path) -> AppDirGuard {
+        isolate_app_dir_at(temp)
     }
 
     fn parse_u64(s: &str) -> Result<u64> {
@@ -1020,7 +1019,7 @@ mod tests {
     #[serial]
     fn test_storage_roundtrip() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-profile")?;
 
@@ -1047,7 +1046,7 @@ mod tests {
     #[serial]
     fn test_load_skips_corrupt_row_and_quarantines() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
         let storage = Storage::new_unwatched("test-profile")?;
 
         // [ valid, malformed, valid ]: the malformed row is an object that
@@ -1101,7 +1100,7 @@ mod tests {
     #[serial]
     fn test_load_top_level_corruption_still_errors() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
         let storage = Storage::new_unwatched("test-profile")?;
 
         fs::create_dir_all(storage.sessions_path.parent().unwrap())?;
@@ -1134,7 +1133,7 @@ mod tests {
         // resolves through `resolve_default_profile`, which bootstraps the
         // first profile. The name is "main", never the magic "default".
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("")?;
         assert_eq!(storage.profile(), "main");
@@ -1147,7 +1146,7 @@ mod tests {
         // When profiles already exist, an empty profile argument resolves to
         // the first one (sorted), not a hard-coded name.
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         get_profile_dir("work")?;
         get_profile_dir("personal")?;
@@ -1163,7 +1162,7 @@ mod tests {
         // An explicitly configured default_profile wins over the first-found
         // directory.
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         get_profile_dir("work")?;
         get_profile_dir("personal")?;
@@ -1182,7 +1181,7 @@ mod tests {
     #[serial]
     fn test_storage_new_with_custom_profile() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("custom-profile")?;
         assert_eq!(storage.profile(), "custom-profile");
@@ -1193,7 +1192,7 @@ mod tests {
     #[serial]
     fn test_storage_load_nonexistent_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-empty")?;
         let loaded = storage.load()?;
@@ -1206,7 +1205,7 @@ mod tests {
     #[serial]
     fn test_storage_load_empty_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-empty-file")?;
 
@@ -1223,7 +1222,7 @@ mod tests {
     #[serial]
     fn test_storage_load_whitespace_only_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-whitespace")?;
 
@@ -1239,7 +1238,7 @@ mod tests {
     #[serial]
     fn test_storage_save_leaves_no_temp_files() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-no-debris")?;
 
@@ -1273,7 +1272,7 @@ mod tests {
     #[serial]
     fn test_storage_save_empty_array() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-empty-save")?;
         {
@@ -1294,7 +1293,7 @@ mod tests {
     #[serial]
     fn test_storage_load_with_groups_no_groups_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-no-groups")?;
 
@@ -1315,7 +1314,7 @@ mod tests {
     #[serial]
     fn test_storage_save_and_load_with_groups() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-with-groups")?;
 
@@ -1342,7 +1341,7 @@ mod tests {
     #[serial]
     fn test_load_with_groups_skips_corrupt_row_and_quarantines() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-groups-corrupt-row")?;
         fs::create_dir_all(storage.sessions_path.parent().unwrap())?;
@@ -1394,7 +1393,7 @@ mod tests {
     #[serial]
     fn test_load_with_groups_repeated_read_overwrites_quarantine() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-groups-corrupt-row-repeat")?;
         fs::create_dir_all(storage.sessions_path.parent().unwrap())?;
@@ -1428,7 +1427,7 @@ mod tests {
     #[serial]
     fn test_load_with_groups_top_level_corruption_still_errors() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-groups-top-level-corrupt")?;
         fs::create_dir_all(storage.sessions_path.parent().unwrap())?;
@@ -1455,7 +1454,7 @@ mod tests {
     #[serial]
     fn test_storage_load_invalid_json() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-invalid")?;
 
@@ -1471,7 +1470,7 @@ mod tests {
     #[serial]
     fn test_storage_preserves_instance_fields() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-fields")?;
 
@@ -1504,7 +1503,7 @@ mod tests {
     #[serial]
     fn test_storage_profile_accessor() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         // Verify profiles are correctly named
         let storage1 = Storage::new_unwatched("profile-alpha")?;
@@ -1522,7 +1521,7 @@ mod tests {
     #[serial]
     fn test_storage_groups_file_empty() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-empty-groups")?;
 
@@ -1550,7 +1549,7 @@ mod tests {
     #[serial]
     fn test_workspace_ordering_roundtrip() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         // Empty by default.
         let empty = load_workspace_ordering()?;
@@ -1574,7 +1573,7 @@ mod tests {
     #[serial]
     fn test_workspace_ordering_overwrites_on_save() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         save_workspace_ordering(&WorkspaceOrdering {
             order: vec!["a".to_string(), "b".to_string()],
@@ -1592,7 +1591,7 @@ mod tests {
     #[serial]
     fn test_workspace_ordering_handles_empty_file() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let path = workspace_ordering_path()?;
         if let Some(parent) = path.parent() {
@@ -1609,7 +1608,7 @@ mod tests {
     #[serial]
     fn test_update_atomic_load_modify_save() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-update-roundtrip")?;
         storage.update(|i, g| {
@@ -1634,7 +1633,7 @@ mod tests {
     #[serial]
     fn test_update_propagates_closure_error() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-update-err")?;
         let initial = vec![Instance::new("keep", "/tmp/keep")];
@@ -1660,7 +1659,7 @@ mod tests {
     #[serial]
     fn test_update_serializes_concurrent_writers_same_profile() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-update-concurrent")?;
         storage.update(|i, g| {
@@ -1709,7 +1708,7 @@ mod tests {
     #[serial]
     fn test_update_does_not_serialize_across_profiles() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage_a = Storage::new_unwatched("test-update-profile-a")?;
         let storage_b = Storage::new_unwatched("test-update-profile-b")?;
@@ -1745,7 +1744,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-commit-lock")?;
         storage.update(|i, g| {
@@ -1808,7 +1807,7 @@ mod tests {
     #[serial]
     fn test_workspace_ordering_update_serializes() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         update_workspace_ordering(|ord| {
             ord.order.clear();
@@ -1843,7 +1842,7 @@ mod tests {
     #[serial]
     fn test_profile_lock_registry_returns_same_arc_for_same_profile() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let s1 = Storage::new_unwatched("test-registry-shared")?;
         let s2 = Storage::new_unwatched("test-registry-shared")?;
@@ -1858,7 +1857,7 @@ mod tests {
     #[serial]
     fn test_update_writes_both_sessions_and_groups_files() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-update-both-files")?;
         storage.update(|i, g| {
@@ -1887,7 +1886,7 @@ mod tests {
     #[serial]
     fn test_update_closure_err_leaves_both_files_untouched() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-update-err-untouched")?;
         let seed = vec![Instance::new("seed", "/tmp/seed")];
@@ -1923,7 +1922,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let svc = FileWatchService::new().expect("live svc");
         let storage = Storage::new("test-update-no-notify", svc.clone())?;
@@ -2001,7 +2000,7 @@ mod tests {
     #[serial]
     fn test_update_skips_groups_write_when_groups_unchanged() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-skip-groups-write")?;
         let seed_instances = [Instance::new("seed", "/tmp/seed")];
@@ -2033,7 +2032,7 @@ mod tests {
     #[serial]
     fn test_update_rewrites_groups_when_changed() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage = Storage::new_unwatched("test-rewrite-groups")?;
         let seed_instances = [Instance::new("seed", "/tmp/seed")];
@@ -2065,7 +2064,7 @@ mod tests {
     #[serial]
     fn test_save_lock_registry_recovers_from_poison() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         let storage_outer = Storage::new_unwatched("test-poison-recovery")?;
         let _ = std::thread::spawn(move || {
@@ -2118,7 +2117,7 @@ mod tests {
     #[serial]
     fn record_recent_project_upserts_sorts_and_caps() -> Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         // Capacity + 5 distinct projects, oldest first.
         for i in 0..(RECENT_PROJECTS_CAP + 5) {

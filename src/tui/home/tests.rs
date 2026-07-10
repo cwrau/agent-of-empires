@@ -1,5 +1,6 @@
 //! Tests for HomeView
 
+use crate::session::test_support::{isolate_app_dir_at, AppDirGuard};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serial_test::serial;
 use tempfile::TempDir;
@@ -15,10 +16,8 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn setup_test_home(temp: &TempDir) {
-    std::env::set_var("HOME", temp.path());
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+fn setup_test_home(temp: &TempDir) -> AppDirGuard {
+    isolate_app_dir_at(temp.path())
 }
 
 fn seed_instances(view: &mut HomeView, insts: &[Instance]) {
@@ -26,14 +25,15 @@ fn seed_instances(view: &mut HomeView, insts: &[Instance]) {
 }
 
 struct TestEnv {
-    _temp: TempDir,
     view: HomeView,
+    _guard: AppDirGuard,
+    _temp: TempDir,
 }
 
 fn create_test_env_empty() -> TestEnv {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap(); // ensure profile dir exists
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(
@@ -45,7 +45,11 @@ fn create_test_env_empty() -> TestEnv {
     view.group_by = GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    }
 }
 
 // #1897 / CodeRabbit follow-up: `add_instance` is the funnel for both the
@@ -55,6 +59,7 @@ fn create_test_env_empty() -> TestEnv {
 // counts a session that never existed. Asserts deltas (not absolutes) since the
 // counter is a process-global shared with the `telemetry_creates` serial group.
 #[test]
+#[serial]
 #[serial_test::serial(telemetry_creates)]
 fn add_instance_counts_only_finalized_creates() {
     use crate::session::Status;
@@ -85,7 +90,7 @@ fn add_instance_counts_only_finalized_creates() {
 #[serial]
 fn rewire_disk_subscriptions_is_noop_without_tokio_runtime() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(
@@ -118,7 +123,7 @@ fn rewire_disk_subscriptions_is_noop_without_tokio_runtime() {
 #[serial]
 async fn config_watch_keys_distinguish_global_from_profile_named_global() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let profile_name = "<global>";
     let _storage = Storage::new_unwatched(profile_name).unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
@@ -144,7 +149,7 @@ async fn config_watch_keys_distinguish_global_from_profile_named_global() {
 #[serial]
 fn watcher_refresh_does_not_reopen_hotkey_warning_dialog() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
     let global_config = crate::session::get_app_dir().unwrap().join("config.toml");
     std::fs::write(
@@ -177,7 +182,7 @@ fn watcher_refresh_does_not_reopen_hotkey_warning_dialog() {
 #[serial]
 fn interactive_refresh_reopens_hotkey_warning_dialog() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
     let global_config = crate::session::get_app_dir().unwrap().join("config.toml");
     std::fs::write(
@@ -206,7 +211,7 @@ fn interactive_refresh_reopens_hotkey_warning_dialog() {
 #[serial]
 fn watcher_refresh_stashes_pending_watcher_theme() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
     let global_config = crate::session::get_app_dir().unwrap().join("config.toml");
     std::fs::write(&global_config, "[theme]\nname = \"dracula\"\n").unwrap();
@@ -234,7 +239,7 @@ fn watcher_refresh_stashes_pending_watcher_theme() {
 #[serial]
 fn interactive_refresh_does_not_stash_pending_watcher_theme() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
     let global_config = crate::session::get_app_dir().unwrap().join("config.toml");
     std::fs::write(&global_config, "[theme]\nname = \"dracula\"\n").unwrap();
@@ -261,7 +266,7 @@ fn interactive_refresh_does_not_stash_pending_watcher_theme() {
 #[serial]
 fn take_pending_watcher_theme_clears_the_field() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
 
     let mut view = HomeView::new(
@@ -286,7 +291,7 @@ fn take_pending_watcher_theme_clears_the_field() {
 fn watcher_refresh_stashes_global_theme_not_profile_override() {
     use crate::session::profile_config::{save_profile_config, ProfileConfig};
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
 
     let global_config = crate::session::get_app_dir().unwrap().join("config.toml");
@@ -320,7 +325,7 @@ fn watcher_refresh_stashes_global_theme_not_profile_override() {
 #[serial]
 fn second_watcher_refresh_overwrites_stale_stash() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
 
     let mut view = HomeView::new(
@@ -347,7 +352,7 @@ fn second_watcher_refresh_overwrites_stale_stash() {
 fn create_test_env_with_sessions(count: usize) -> TestEnv {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
     for i in 0..count {
@@ -374,7 +379,11 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
     view.group_by = GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    }
 }
 
 /// Disable trash-first delete for tests that assert the permanent-delete
@@ -405,7 +414,7 @@ fn enable_confirm_delete() {
 fn create_test_env_with_groups() -> TestEnv {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
 
@@ -438,14 +447,18 @@ fn create_test_env_with_groups() -> TestEnv {
     view.group_by = GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    }
 }
 
 fn create_test_env_with_mixed_sessions() -> TestEnv {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
 
@@ -483,7 +496,11 @@ fn create_test_env_with_mixed_sessions() -> TestEnv {
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    }
 }
 
 #[test]
@@ -1349,7 +1366,7 @@ fn test_enter_on_session_returns_attach_action() {
 fn test_enter_on_acp_session_opens_structured_view() {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = vec![
         Instance::new("plain", "/tmp/0"),
@@ -2321,7 +2338,7 @@ fn test_uppercase_p_picker_esc_closes() {
 #[serial]
 fn test_uppercase_p_picker_switch_profile() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     crate::session::create_profile("first").unwrap();
     crate::session::create_profile("second").unwrap();
@@ -2523,7 +2540,7 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     use crate::session::{GroupTree, SandboxInfo};
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
 
@@ -2575,7 +2592,11 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    }
 }
 
 /// Trashing and restoring a session through the view's own actions keeps the
@@ -2632,7 +2653,7 @@ fn test_group_has_managed_worktrees() {
     use chrono::Utc;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
@@ -2680,7 +2701,7 @@ fn test_group_has_containers() {
     use crate::session::SandboxInfo;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
@@ -2855,7 +2876,7 @@ fn test_archive_selected_group_widened_teardown_persists_synchronously() {
 #[serial]
 fn test_archive_selected_group_project_mode() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     // Two sessions sharing one repo, one session in a different repo.
@@ -3014,7 +3035,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
     use chrono::Utc;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
@@ -3076,7 +3097,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
     use crate::tui::dialogs::GroupDeleteOptions;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
@@ -3707,7 +3728,7 @@ fn attention_env_running_then_waiting() -> (TestEnv, usize, usize) {
     use crate::session::Status;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut running = Instance::new("running", "/tmp/running");
@@ -3735,7 +3756,11 @@ fn attention_env_running_then_waiting() -> (TestEnv, usize, usize) {
     view.sort_order = SortOrder::Attention;
     view.flat_items = view.build_flat_items();
     view.update_selected();
-    let env = TestEnv { _temp: temp, view };
+    let env = TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    };
 
     let status_at = |env: &TestEnv, idx: usize| match env.view.flat_items.get(idx) {
         Some(Item::Session { id, .. }) => env.view.get_instance(id).map(|i| i.status),
@@ -3755,7 +3780,7 @@ fn attention_env_running_then_idle() -> (TestEnv, usize, usize) {
     use crate::session::Status;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut running = Instance::new("running", "/tmp/running");
@@ -3783,7 +3808,11 @@ fn attention_env_running_then_idle() -> (TestEnv, usize, usize) {
     view.sort_order = SortOrder::Attention;
     view.flat_items = view.build_flat_items();
     view.update_selected();
-    let env = TestEnv { _temp: temp, view };
+    let env = TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    };
 
     let status_at = |env: &TestEnv, idx: usize| match env.view.flat_items.get(idx) {
         Some(Item::Session { id, .. }) => env.view.get_instance(id).map(|i| i.status),
@@ -3862,7 +3891,7 @@ fn test_non_strict_w_on_collapsed_project_group_reveals_idle_in_attention_sort()
     use crate::session::Status;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut alpha_idle = Instance::new("alpha-idle", "/repos/alpha");
@@ -4367,7 +4396,7 @@ fn test_o_key_clamps_cursor_when_list_shrinks() {
 #[serial]
 fn test_all_profiles_view_loads_from_multiple_profiles() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
@@ -4412,7 +4441,7 @@ fn test_all_profiles_view_loads_from_multiple_profiles() {
 #[serial]
 fn test_filtered_view_loads_single_profile() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
@@ -4458,7 +4487,7 @@ fn test_filtered_view_loads_single_profile() {
 #[serial]
 fn test_all_profiles_view_has_no_profile_headers() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
@@ -4504,7 +4533,7 @@ fn test_all_profiles_view_has_no_profile_headers() {
 #[serial]
 fn test_all_profiles_view_shows_all_sessions_flat() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
@@ -4560,7 +4589,7 @@ fn rendered_single_session_text(
     row_tag_mode: crate::session::config::RowTagMode,
 ) -> String {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage = Storage::new_unwatched("alpha").unwrap();
     let instances = vec![inst];
@@ -4617,7 +4646,7 @@ fn test_default_row_tag_mode_renders_branch_tag() {
 #[serial]
 fn test_row_tag_auto_renders_profile_in_all_profiles_view() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage_a = Storage::new_unwatched("alpha").unwrap();
     let instances_a = vec![Instance::new("A1", "/tmp/a")];
@@ -4675,7 +4704,7 @@ fn test_row_tag_auto_renders_profile_in_all_profiles_view() {
 #[serial]
 fn test_row_tag_auto_omits_tag_in_filtered_view() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage_a = Storage::new_unwatched("alpha").unwrap();
     let instances_a = vec![Instance::new("A1", "/tmp/a")];
@@ -4723,7 +4752,7 @@ fn test_row_tag_auto_omits_tag_in_filtered_view() {
 #[serial]
 fn test_row_tag_profile_renders_in_filtered_view() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage_a = Storage::new_unwatched("alpha").unwrap();
     let instances_a = vec![Instance::new("A1", "/tmp/a")];
@@ -4798,7 +4827,7 @@ fn test_row_tag_branch_renders_when_branch_differs_from_title() {
 #[serial]
 fn test_row_tag_branch_renders_when_title_matches_branch() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage = Storage::new_unwatched("alpha").unwrap();
     // Title and branch MATCH, so the divergence display stays quiet.
@@ -4943,7 +4972,7 @@ fn test_row_tag_branch_renders_workspace_branch_repo_count() {
 #[serial]
 fn test_row_tag_auto_skips_for_empty_source_profile() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let storage = Storage::new_unwatched("legacy").unwrap();
     let mut inst = Instance::new("Legacy1", "/tmp/legacy");
@@ -4982,7 +5011,7 @@ fn test_create_session_in_all_mode_is_findable() {
     use crate::tui::dialogs::NewSessionData;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     // Create a profile so "all" mode has something
     let storage = Storage::new_unwatched("alpha").unwrap();
@@ -5046,7 +5075,7 @@ fn test_save_preserves_per_profile_collapsed_state() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     // Create alpha with group "work" (collapsed)
     let storage_a = Storage::new_unwatched("alpha").unwrap();
@@ -5134,7 +5163,7 @@ fn test_save_preserves_per_profile_collapsed_state() {
 #[serial]
 fn test_create_profile_rejects_reserved_name_all() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("default").unwrap();
 
     let result = crate::session::create_profile("all");
@@ -5155,7 +5184,7 @@ fn test_delete_group_scoped_to_owning_profile() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     // Create alpha with group "work"
     let storage_a = Storage::new_unwatched("alpha").unwrap();
@@ -5260,7 +5289,7 @@ fn test_group_delete_dialog_scoped_to_owning_profile() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     // alpha owns an EMPTY "work" group (group exists, no sessions).
     let storage_a = Storage::new_unwatched("alpha").unwrap();
@@ -5335,7 +5364,7 @@ fn test_rename_profile_change_prunes_source_group() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     // alpha has one session in "work"; beta exists but is empty.
     let storage_a = Storage::new_unwatched("alpha").unwrap();
@@ -5828,7 +5857,7 @@ fn test_shift_n_prefills_main_repo_path_for_worktree_session() {
     use crate::session::WorktreeInfo;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst = Instance::new("worktree-session", "/tmp/repo-worktrees/feature-branch");
@@ -5957,7 +5986,7 @@ fn test_rename_selected_group_with_children() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("parent-session", "/tmp/p");
@@ -6064,7 +6093,7 @@ fn test_rename_group_removes_old_path() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst = Instance::new("work-session", "/tmp/w");
@@ -6108,7 +6137,7 @@ fn test_rename_group_empty_group() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let instances: Vec<Instance> = vec![];
@@ -6158,7 +6187,7 @@ fn test_rename_group_duplicate_returns_error() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/w");
@@ -6202,7 +6231,7 @@ fn test_rename_group_resort_az() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let mut config = Config::default();
     config.app_state.sort_order = Some(SortOrder::AZ);
@@ -6297,7 +6326,7 @@ fn test_apply_creation_results_returns_session_id() {
     use crate::tui::dialogs::NewSessionData;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     let project_dir = temp.path().join("project");
     std::fs::create_dir_all(&project_dir).unwrap();
@@ -6435,7 +6464,7 @@ fn test_cursor_follows_session_after_deletion() {
 #[serial]
 fn home_defaults_to_agent_when_config_unset() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _storage = Storage::new_unwatched("test").unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
@@ -8207,7 +8236,7 @@ fn restart_selected_session_surfaces_resume_failed_after_async_restart() {
     }
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let profile = "restart-resume-failed";
     let storage = Storage::new_unwatched(profile).unwrap();
     let stale_sid = "11111111-2222-3333-4444-555555555555";
@@ -8429,7 +8458,7 @@ fn delete_selected_refused_during_restart() {
 fn create_test_env_two_projects_mixed_attention() -> TestEnv {
     use crate::session::Status;
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     let mut alpha_waiting = Instance::new("alpha-waiting", "/repos/alpha");
@@ -8458,7 +8487,11 @@ fn create_test_env_two_projects_mixed_attention() -> TestEnv {
         crate::file_watch::FileWatchService::noop(),
     )
     .unwrap();
-    TestEnv { _temp: temp, view }
+    TestEnv {
+        view,
+        _guard,
+        _temp: temp,
+    }
 }
 
 /// Project grouping must survive Attention sort. Previously `build_flat_items`
@@ -8831,7 +8864,7 @@ fn stale_registry_entry_with_mismatched_archived_path_stays_pinned_and_unpinnabl
     use crate::session::Status;
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
 
     // A live session in another project, plus an ARCHIVED session whose repo
@@ -9061,7 +9094,7 @@ fn all_profiles_view_includes_profile_scoped_pins() {
     use crate::session::projects::{self, Project, ProjectScope};
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     // Two discoverable profiles, each with a session.
     for (profile, title, path) in [
@@ -9119,7 +9152,7 @@ fn unpin_profile_scoped_pin_from_all_profiles_clears_header() {
     use crate::session::projects::{self, Project, ProjectScope};
 
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
 
     // Two discoverable profiles, each with a session, so all-profiles mode
     // loads both registries.
@@ -9413,7 +9446,7 @@ fn manual_grouping_attention_sort_stays_flat() {
 #[serial]
 fn prune_empty_group_drops_source_when_no_session_remains() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _ = Storage::new_unwatched("alpha").unwrap();
     let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
@@ -9450,7 +9483,7 @@ fn prune_empty_group_drops_source_when_no_session_remains() {
 #[serial]
 fn prune_empty_group_keeps_source_when_sibling_session_remains() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _ = Storage::new_unwatched("alpha").unwrap();
     let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
@@ -9486,7 +9519,7 @@ fn prune_empty_group_keeps_source_when_sibling_session_remains() {
 #[serial]
 fn prune_empty_group_keeps_source_when_descendant_session_remains() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _ = Storage::new_unwatched("alpha").unwrap();
     let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
@@ -9524,7 +9557,7 @@ fn prune_empty_group_keeps_source_when_descendant_session_remains() {
 #[serial]
 fn prune_empty_group_keeps_source_when_descendant_group_remains() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _ = Storage::new_unwatched("alpha").unwrap();
     let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
@@ -9566,7 +9599,7 @@ fn prune_empty_group_keeps_source_when_descendant_group_remains() {
 #[serial]
 fn prune_empty_group_survives_save_and_reload() {
     let temp = TempDir::new().unwrap();
-    setup_test_home(&temp);
+    let _guard = setup_test_home(&temp);
     let _ = Storage::new_unwatched("alpha").unwrap();
     let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
@@ -14179,9 +14212,12 @@ mod save_field_merge {
     use super::*;
     use chrono::Utc;
 
-    fn boot_view_with_one_session(title: &str, path: &str) -> (TempDir, HomeView, String) {
+    fn boot_view_with_one_session(
+        title: &str,
+        path: &str,
+    ) -> (TempDir, AppDirGuard, HomeView, String) {
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let guard = setup_test_home(&temp);
         let storage = Storage::new_unwatched("test").unwrap();
         let inst = Instance::new(title, path);
         let id = inst.id.clone();
@@ -14200,13 +14236,13 @@ mod save_field_merge {
             crate::file_watch::FileWatchService::noop(),
         )
         .unwrap();
-        (temp, view, id)
+        (temp, guard, view, id)
     }
 
     #[test]
     #[serial]
     fn test_save_preserves_peer_field_update() {
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
         let peer_storage = Storage::new_unwatched("test").unwrap();
         let peer_archived_at = Utc::now();
@@ -14233,7 +14269,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_save_preserves_peer_added_row() {
-        let (_temp, mut view, _id) = boot_view_with_one_session("a", "/tmp/a");
+        let (_temp, _guard, mut view, _id) = boot_view_with_one_session("a", "/tmp/a");
 
         let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
@@ -14260,7 +14296,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_save_drops_explicitly_deleted_row() {
-        let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/victim");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("victim", "/tmp/victim");
 
         view.remove_instance(&id);
         view.save().expect("save must propagate the delete");
@@ -14275,7 +14311,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_save_drains_pending_deletions_on_ok() {
-        let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/victim");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("victim", "/tmp/victim");
 
         view.remove_instance(&id);
         assert!(
@@ -14296,7 +14332,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_save_preserves_peer_added_group() {
-        let (_temp, mut view, _id) = boot_view_with_one_session("a", "/tmp/a");
+        let (_temp, _guard, mut view, _id) = boot_view_with_one_session("a", "/tmp/a");
 
         let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
@@ -14323,7 +14359,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_apply_user_action_persists_atomically() {
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
         view.apply_user_action(&id, |inst| inst.archive())
             .expect("apply_user_action must persist");
@@ -14339,7 +14375,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_apply_user_action_does_not_clobber_peer_field() {
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
         let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
@@ -14367,7 +14403,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_apply_user_action_disk_and_memory_share_one_timestamp() {
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
         view.apply_user_action(&id, |inst| inst.archive())
             .expect("apply_user_action must persist");
@@ -14399,7 +14435,7 @@ mod save_field_merge {
         // the TUI then archives, archive wins because it is the
         // indefinite sink; leaving both flags persisted would surface
         // contradictory triage state on the next render.
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
         let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
@@ -14431,7 +14467,7 @@ mod save_field_merge {
         // instead of archive so the snoozed_until field IS touched on
         // both sides and the test isolates the peer-field-survival
         // invariant from the archive XOR rules tested above.
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
         let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
@@ -14458,7 +14494,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_save_drops_peer_deleted_row_from_mirror() {
-        let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/peer-rm");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("victim", "/tmp/peer-rm");
 
         // Simulate `aoe session remove victim` from another process: peer
         // deletes the row from disk while TUI still has it in memory.
@@ -14491,7 +14527,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_save_pushes_tui_added_row_to_disk() {
-        let (_temp, mut view, _) = boot_view_with_one_session("seed", "/tmp/seed");
+        let (_temp, _guard, mut view, _) = boot_view_with_one_session("seed", "/tmp/seed");
 
         let mut new_inst = Instance::new("tui-added", "/tmp/added");
         new_inst.source_profile = "test".to_string();
@@ -14514,7 +14550,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_save_add_then_remove_in_same_cycle_does_not_persist() {
-        let (_temp, mut view, _) = boot_view_with_one_session("seed", "/tmp/seed");
+        let (_temp, _guard, mut view, _) = boot_view_with_one_session("seed", "/tmp/seed");
 
         let mut new_inst = Instance::new("ephemeral", "/tmp/ephemeral");
         new_inst.source_profile = "test".to_string();
@@ -14534,7 +14570,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_move_to_profile_marks_tombstone_and_pending_added() {
-        let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
         view.storages.insert(
             "target".to_string(),
             Storage::new_unwatched("target").unwrap(),
@@ -14563,7 +14599,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_move_to_profile_save_roundtrip_persists_under_target() {
-        let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
         view.storages.insert(
             "target".to_string(),
             Storage::new_unwatched("target").unwrap(),
@@ -14587,7 +14623,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_move_to_profile_same_profile_only_updates_group_path() {
-        let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
 
         view.move_to_profile(&id, "test", "newgrp".to_string())
             .unwrap();
@@ -14603,7 +14639,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn test_reload_honors_peer_cleared_session_id() {
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/sid");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/sid");
 
         // Seed a stale sid via the in-memory mirror + persist.
         view.mutate_instance(&id, |inst| {
@@ -14644,7 +14680,7 @@ mod save_field_merge {
     fn stamp_last_accessed_on_archived_row_unsinks_persistently() {
         use crate::session::{is_archived_section_path, Item};
 
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/grp");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/grp");
 
         view.apply_user_action(&id, |inst| inst.archive())
             .expect("seed archive must persist");
@@ -14694,7 +14730,7 @@ mod save_field_merge {
     #[test]
     #[serial]
     fn stamp_last_accessed_on_snoozed_row_persistently_clears_snooze() {
-        let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/grp");
+        let (_temp, _guard, mut view, id) = boot_view_with_one_session("session", "/tmp/grp");
 
         view.apply_user_action(&id, |inst| inst.snooze(30))
             .expect("seed snooze must persist");
@@ -15423,7 +15459,7 @@ mod apply_session_id_updates {
             return;
         }
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _guard = setup_test_home(&temp);
 
         let profile = "apply-publish";
         let inst = fresh_instance(profile, "apa");
@@ -15445,7 +15481,7 @@ mod apply_session_id_updates {
             return;
         }
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _guard = setup_test_home(&temp);
 
         let profile = "apply-terminal-publish";
         let mut inst = fresh_instance(profile, "terminal-post-cas");
@@ -15470,7 +15506,7 @@ mod apply_session_id_updates {
             return;
         }
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _guard = setup_test_home(&temp);
 
         let profile = "apply-excludes";
         let inst = fresh_instance(profile, "aer");
@@ -15515,7 +15551,7 @@ mod apply_session_id_updates {
             return;
         }
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _guard = setup_test_home(&temp);
 
         let profile = "apply-skipped";
         let peer_sid = "019342aa-3333-7eee-8fff-aaaabbbbcccc";
@@ -15569,7 +15605,7 @@ mod apply_session_id_updates {
             return;
         }
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _guard = setup_test_home(&temp);
 
         let profile = "apply-invalid";
         let inst = fresh_instance(profile, "aiv");
@@ -15603,7 +15639,7 @@ mod apply_session_id_updates {
             return;
         }
         let temp = TempDir::new().unwrap();
-        setup_test_home(&temp);
+        let _guard = setup_test_home(&temp);
 
         let profile = "apply-pane-dead";
         let inst = fresh_instance(profile, "apds");

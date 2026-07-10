@@ -8480,13 +8480,12 @@ pub async fn read_output(
 #[cfg(test)]
 mod workspace_ordering_tests {
     use super::*;
+    use crate::session::test_support::{isolate_app_dir_at, AppDirGuard};
     use serial_test::serial;
     use tempfile::tempdir;
 
-    fn setup_test_home(temp: &std::path::Path) {
-        std::env::set_var("HOME", temp);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        std::env::set_var("XDG_CONFIG_HOME", temp.join(".config"));
+    fn setup_test_home(temp: &std::path::Path) -> AppDirGuard {
+        isolate_app_dir_at(temp)
     }
 
     fn mock_response(id: &str, project_path: &str, branch: Option<&str>) -> SessionResponse {
@@ -8590,7 +8589,7 @@ mod workspace_ordering_tests {
     #[serial]
     fn merge_prepends_unseen_newest_first() -> anyhow::Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         // Persisted ordering already contains `b`. Sessions come in
         // creation order (oldest first) `[b, a, c]`; `a` and `c` are
@@ -8627,7 +8626,7 @@ mod workspace_ordering_tests {
     #[serial]
     fn merge_dedupes_within_a_single_request() -> anyhow::Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         // Two sessions on the same workspace (rare but legal: multiple
         // agents in one worktree). The workspace id appears once.
@@ -8645,7 +8644,7 @@ mod workspace_ordering_tests {
     #[serial]
     fn merge_no_op_when_all_known() -> anyhow::Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         crate::session::update_workspace_ordering(|ord| {
             ord.order = vec!["/tmp/repo::a".to_string(), "/tmp/repo::b".to_string()];
@@ -8669,7 +8668,7 @@ mod workspace_ordering_tests {
     #[serial]
     fn merge_read_only_returns_merged_but_does_not_write() -> anyhow::Result<()> {
         let temp = tempdir()?;
-        setup_test_home(temp.path());
+        let _guard = setup_test_home(temp.path());
 
         // Empty starting state. Read-only request observes a new
         // workspace; the response includes it but disk is untouched.
