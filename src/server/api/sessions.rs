@@ -496,6 +496,25 @@ fn custom_agent_acp_capable(
         .is_some_and(|cmd| crate::acp::AgentSpec::from_acp_cmd(tool, cmd).is_ok())
 }
 
+type SessionConfigCache =
+    std::collections::HashMap<(String, String), crate::session::config::SessionConfig>;
+
+fn cached_session_config<'a>(
+    cache: &'a mut SessionConfigCache,
+    profile: &str,
+    project_path: &str,
+) -> &'a crate::session::config::SessionConfig {
+    cache
+        .entry((profile.to_string(), project_path.to_string()))
+        .or_insert_with(|| {
+            crate::session::repo_config::resolve_config_with_repo_or_warn(
+                profile,
+                std::path::Path::new(project_path),
+            )
+            .session
+        })
+}
+
 #[derive(serde::Serialize)]
 pub struct RecentProjectsResponse {
     pub projects: Vec<crate::session::RecentProjectEntry>,
@@ -571,28 +590,25 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<SessionsE
         })
         .collect();
 
+    let mut session_cfg_cache = SessionConfigCache::new();
+
     // Overlay custom-agent ACP capability (built-ins were resolved in the
     // constructor). Cache by (profile, project_path) since repo-local
-    // config can override agent_acp_cmd, so each distinct pair is
-    // resolved at most once.
+    // config can override agent_acp_cmd. The same cache feeds the
+    // smart-rename overlay below, so each distinct pair is resolved at most
+    // once per request.
     #[cfg(feature = "serve")]
     {
-        use std::collections::HashMap;
-        let mut acp_cmd_cache: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
         for (resp, inst) in sessions.iter_mut().zip(instances.iter()) {
             if resp.acp_capable {
                 continue;
             }
-            let key = (inst.source_profile.clone(), inst.project_path.clone());
-            let map = acp_cmd_cache.entry(key).or_insert_with(|| {
-                crate::session::repo_config::resolve_config_with_repo_or_warn(
-                    &inst.source_profile,
-                    std::path::Path::new(&inst.project_path),
-                )
-                .session
-                .agent_acp_cmd
-            });
-            resp.acp_capable = custom_agent_acp_capable(map, &inst.tool);
+            let cfg = cached_session_config(
+                &mut session_cfg_cache,
+                &inst.source_profile,
+                &inst.project_path,
+            );
+            resp.acp_capable = custom_agent_acp_capable(&cfg.agent_acp_cmd, &inst.tool);
         }
     }
 
@@ -653,12 +669,8 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<SessionsE
     // indicator cannot drift from the runtime gate. Config resolved once per
     // (profile, project_path) so repo-local overrides are honored.
     {
-        use crate::session::smart_rename::{
-            check_eligible_resolved, resolve_smart_rename_config, SmartRenameConfig,
-            SmartRenameState,
-        };
-        use std::collections::{HashMap, HashSet};
-        use std::path::Path;
+        use crate::session::smart_rename::{check_eligible_resolved, SmartRenameState};
+        use std::collections::HashSet;
         let inflight: HashSet<String> = state
             .smart_rename_inflight
             .lock()
@@ -669,7 +681,6 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<SessionsE
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let mut cfg_cache: HashMap<(String, String), SmartRenameConfig> = HashMap::new();
         for (resp, inst) in sessions.iter_mut().zip(instances.iter()) {
             resp.default_name = crate::session::civilizations::is_default_civ_name(&inst.title);
             if inflight.contains(&inst.id) {
@@ -681,19 +692,20 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<SessionsE
             if attempted.contains(&inst.id) {
                 continue;
             }
-            let key = (inst.source_profile.clone(), inst.project_path.clone());
-            let cfg = cfg_cache.entry(key).or_insert_with(|| {
-                resolve_smart_rename_config(&inst.source_profile, Path::new(&inst.project_path))
-            });
+            let cfg = cached_session_config(
+                &mut session_cfg_cache,
+                &inst.source_profile,
+                &inst.project_path,
+            );
             let eligible = check_eligible_resolved(
                 inst.is_structured(),
-                cfg.setting_on,
+                cfg.smart_rename,
                 &inst.title,
                 &inst.tool,
-                &cfg.rename_agent,
+                &cfg.smart_rename_agent,
                 inst.is_sandboxed(),
                 &inst.command,
-                &cfg.overrides,
+                &cfg.agent_command_override,
             )
             .is_ok();
             if eligible {
@@ -7277,6 +7289,27 @@ mod tests {
             "default",
             project.path()
         ));
+    }
+
+    #[test]
+    fn list_sessions_uses_shared_repo_config_cache() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/api/sessions.rs"),
+        )
+        .unwrap();
+        let start = source.find("pub async fn list_sessions").unwrap();
+        let end = source[start..].find("// Workspace id derivation").unwrap() + start;
+        let list_source = &source[start..end];
+
+        assert!(list_source.contains("let mut session_cfg_cache = SessionConfigCache::new()"));
+        assert!(list_source.contains("cached_session_config("));
+        assert!(list_source.contains("&cfg.agent_acp_cmd"));
+        assert!(list_source.contains("cfg.smart_rename"));
+        assert!(list_source.contains("&cfg.smart_rename_agent"));
+        assert!(list_source.contains("&cfg.agent_command_override"));
+        assert!(!list_source.contains("acp_cmd_cache"));
+        assert!(!list_source.contains("let mut cfg_cache"));
+        assert!(!list_source.contains("resolve_smart_rename_config"));
     }
 
     #[test]
