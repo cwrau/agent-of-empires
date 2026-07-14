@@ -3293,8 +3293,11 @@ impl HomeView {
             if let Some(inst) = self.get_instance(&id) {
                 // Trashed rows are stopped and only surface under the collapsed
                 // Trash section; they never "need attention", so skip them even
-                // when a stale unread flag survived the trash (#2489).
-                let is_actionable = !inst.is_trashed()
+                // when a stale unread flag survived the trash (#2489). Snoozed
+                // and archived rows are likewise explicit "don't bother me"
+                // sink states, same as everywhere else that checks
+                // `is_snoozed()` / `is_archived()`.
+                let is_actionable = !inst.is_dismissed()
                     && (inst.status == Status::Waiting
                         || matches!(inst.idle_age(), Some(age) if age < window)
                         || (crate::session::unread_enabled() && inst.is_unread()));
@@ -3311,8 +3314,7 @@ impl HomeView {
             .find(|inst| {
                 if visible_sessions.contains(&inst.id)
                     || current_session.as_deref() == Some(inst.id.as_str())
-                    || inst.is_archived()
-                    || inst.is_trashed()
+                    || inst.is_dismissed()
                 {
                     return false;
                 }
@@ -3341,7 +3343,7 @@ impl HomeView {
             let Some(inst) = self.get_instance(&id) else {
                 continue;
             };
-            if inst.is_trashed() {
+            if inst.is_dismissed() {
                 continue;
             }
             if inst.status != Status::Idle {
@@ -3374,8 +3376,7 @@ impl HomeView {
         for inst in self.instances.values() {
             if visible_sessions.contains(&inst.id)
                 || current_session.as_deref() == Some(inst.id.as_str())
-                || inst.is_archived()
-                || inst.is_trashed()
+                || inst.is_dismissed()
                 || inst.status != Status::Idle
             {
                 continue;
