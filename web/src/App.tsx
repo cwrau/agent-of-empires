@@ -905,41 +905,57 @@ function AppContent({
   }, []);
 
   const deletingWorkspace = deletingWorkspaceId ? workspaces.find((w) => w.id === deletingWorkspaceId) : null;
+  const deletingSessions = deletingWorkspace?.sessions ?? [];
+  const liveDeletingSessions = deletingSessions.filter((session) => !session.trashed_at);
   const deletingSession = deletingWorkspace?.sessions[0] ?? null;
+  const deletingDefaultToTrash = liveDeletingSessions.some((session) => session.cleanup_defaults.delete_to_trash);
+  const deletingCleanupDefaults = deletingSession
+    ? {
+        delete_to_trash: deletingDefaultToTrash,
+        delete_worktree: deletingSessions.some(
+          (session) => (session.has_cleanable_worktree ?? false) && session.cleanup_defaults.delete_worktree,
+        ),
+        delete_branch: deletingSessions.some(
+          (session) => (session.has_cleanable_worktree ?? false) && session.cleanup_defaults.delete_branch,
+        ),
+        delete_sandbox: deletingSessions.some(
+          (session) => session.is_sandboxed && session.cleanup_defaults.delete_sandbox,
+        ),
+      }
+    : null;
+  const deletingBranchName =
+    deletingSessions.find((session) => session.branch)?.branch ?? deletingSession?.branch ?? null;
 
   const handleDeleteSession = useCallback((workspaceId: string) => {
     setDeletingWorkspaceId(workspaceId);
   }, []);
 
-  const handleConfirmDelete = useCallback(
-    async (options: DeleteSessionOptions) => {
-      if (!deletingWorkspace) return;
-      const sessions = deletingWorkspace.sessions;
-      // Close the dialog immediately; the loop, ordering, and toast logic live
-      // in deleteWorkspaceSessions so they are unit-testable without the bundle.
-      setDeletingWorkspaceId(null);
-      await deleteWorkspaceSessions(sessions, options, activeSessionId, {
-        setStatus: setSessionStatus,
-        // Drop a deleted session's local-only state (#1358 acp cache + draft,
-        // #1842 diff comments). Cross-tab / cross-device deletes fall to the
-        // startup sweep.
-        purgeLocal: (id) => {
-          clearAcpCache(id);
-          clearDraft(id);
-          clearStoredComments(id);
-        },
-        navigateHome: () => navigate("/"),
-        notify: toastBus.handler,
-      });
-    },
-    [deletingWorkspace, activeSessionId, setSessionStatus, navigate],
-  );
+  const handleConfirmDelete = async (options: DeleteSessionOptions) => {
+    if (!deletingWorkspace) return;
+    const sessions = deletingWorkspace.sessions;
+    // Close the dialog immediately; the loop, ordering, and toast logic live
+    // in deleteWorkspaceSessions so they are unit-testable without the bundle.
+    setDeletingWorkspaceId(null);
+    await deleteWorkspaceSessions(sessions, options, activeSessionId, {
+      setStatus: setSessionStatus,
+      // Drop a deleted session's local-only state (#1358 acp cache + draft,
+      // #1842 diff comments). Cross-tab / cross-device deletes fall to the
+      // startup sweep.
+      purgeLocal: (id) => {
+        clearAcpCache(id);
+        clearDraft(id);
+        clearStoredComments(id);
+      },
+      navigateHome: () => navigate("/"),
+      notify: toastBus.handler,
+    });
+  };
 
   // Move-to-trash path (#2489): the safe default. Unlike permanent delete it
   // deliberately KEEPS the per-session acp cache, draft, and stored comments
   // so a restore is faithful; only purge clears them. Trashes every session
   // in the workspace so a multi-session workspace sinks as a whole.
-  const handleConfirmTrash = useCallback(async () => {
+  const handleConfirmTrash = async () => {
     if (!deletingWorkspace) return;
     const ids = deletingWorkspace.sessions.map((s) => s.id);
     if (ids.length === 0) return;
@@ -958,7 +974,7 @@ function AppContent({
       onError: (id) => setSessionStatus(id, "Error"),
       notify: toastBus.handler,
     });
-  }, [deletingWorkspace, activeSessionId, setSessionStatus, applySession, navigate]);
+  };
 
   // Restore a trashed workspace from the sidebar Trash section (#2489).
   // Restores every session in the workspace (a workspace only lands in Trash
@@ -1939,16 +1955,20 @@ function AppContent({
         {showAbout && <AboutModal onClose={() => setShowAbout(false)} sessionId={activeSessionId} />}
         {telemetryConsentNeeded && <TelemetryConsentModal onChoose={handleTelemetryConsent} />}
 
-        {deletingSession && (
+        {deletingSession && deletingCleanupDefaults && (
           <DeleteSessionDialog
             sessionTitle={deletingSession.title}
-            branchName={deletingSession.branch}
-            hasManagedWorktree={deletingSession.has_cleanable_worktree ?? false}
-            isSandboxed={deletingSession.is_sandboxed}
-            isScratch={deletingSession.scratch}
-            cleanupDefaults={deletingSession.cleanup_defaults}
-            defaultToTrash={!deletingSession.trashed_at && deletingSession.cleanup_defaults.delete_to_trash}
-            extraSessionCount={deletingWorkspace ? deletingWorkspace.sessions.length - 1 : 0}
+            branchName={deletingBranchName}
+            hasManagedWorktree={deletingSessions.some((session) => session.has_cleanable_worktree ?? false)}
+            isSandboxed={deletingSessions.some((session) => session.is_sandboxed)}
+            isScratch={deletingSessions.some((session) => session.scratch)}
+            cleanupDefaults={deletingCleanupDefaults}
+            defaultToTrash={deletingDefaultToTrash}
+            affectedSessions={deletingSessions.map((session) => ({
+              id: session.id,
+              title: session.title,
+              isSandboxed: session.is_sandboxed,
+            }))}
             onConfirm={handleConfirmDelete}
             onTrash={handleConfirmTrash}
             onCancel={() => setDeletingWorkspaceId(null)}
