@@ -1180,6 +1180,11 @@ export interface ServerAbout {
   auth_mode: "token" | "passphrase" | "none";
   read_only: boolean;
   behind_tunnel: boolean;
+  /** CityHall client mode (`AOE_CITYHALL_MODE`). Locks the dashboard
+   *  down to a composer + structured-view end-user client: name-only
+   *  session creation, theme-only settings, no terminal / diff /
+   *  project-management. Enforced server-side too. See #7. */
+  cityhall_mode: boolean;
   profile: string;
   /** Resolved `acp.show_tool_durations` from the active profile's
    *  config. Drives the per-tool elapsed-time label in the acp
