@@ -1865,6 +1865,7 @@ function AppContent({
   const tour = useTour({
     scope: tourScope,
     readOnly: !!serverAbout?.read_only,
+    cityhall: caps.cityhall,
     isDesktop: !isCoarse,
     autoLaunchReady: tourAutoLaunchReady && welcome.resolved,
     seen: tourSeen,
