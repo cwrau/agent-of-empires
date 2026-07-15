@@ -14424,6 +14424,103 @@ mod default_attach_mode {
             action
         );
     }
+
+    fn render_footer(env: &mut TestEnv) -> String {
+        use crate::tui::styles::load_theme;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = load_theme("empire");
+        let backend = TestBackend::new(200, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                env.view.render(f, area, &theme, None, None, None);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Tab is Enter's complement on a session row: whichever of
+    /// live-send / tmux-attach `default_attach_mode` doesn't route Enter
+    /// to. The footer must surface that complement so it isn't only
+    /// discoverable by reading the source or the `?` help overlay.
+    #[test]
+    #[serial]
+    fn footer_advertises_tab_as_live_when_default_is_tmux() {
+        let mut env = create_test_env_empty();
+        let _id = add_session(&mut env.view, "session-one");
+        env.view.flat_items = env.view.build_flat_items();
+        env.view.cursor = 0;
+        env.view.update_selected();
+        let out = render_footer(&mut env);
+        assert!(
+            out.contains("↵  Attach"),
+            "Enter hint should stay tmux attach under the default mode.\n{out}"
+        );
+        assert!(
+            out.contains("⇥  Live"),
+            "Tab hint should advertise Live mode when Enter is pinned to tmux attach.\n{out}"
+        );
+    }
+
+    /// Inverse of the above: once `default_attach_mode = LiveSend` takes
+    /// over Enter, the two hints swap rather than both claiming "Attach".
+    /// Enter owns live-send and Tab becomes the tmux escape hatch, the
+    /// same swap the `?` overlay does for this pairing.
+    #[test]
+    #[serial]
+    fn footer_advertises_tab_as_attach_when_default_is_live_send() {
+        let mut env = create_test_env_empty();
+        write_global_default_attach_mode(NewSessionAttachMode::LiveSend);
+        let _id = add_session(&mut env.view, "session-one");
+        env.view.flat_items = env.view.build_flat_items();
+        env.view.cursor = 0;
+        env.view.update_selected();
+        let out = render_footer(&mut env);
+        assert!(
+            out.contains("↵  Live"),
+            "Enter hint should say Live once it owns live-send.\n{out}"
+        );
+        assert!(
+            out.contains("⇥  Attach"),
+            "Tab hint should offer the tmux escape hatch once Enter owns live-send.\n{out}"
+        );
+    }
+
+    /// Acp/structured rows ignore `default_attach_mode` entirely (Tab
+    /// either mirrors Enter or no-ops), so the footer must not advertise
+    /// a Tab complement that doesn't actually do anything different.
+    #[test]
+    #[serial]
+    fn footer_hides_tab_hint_for_structured_sessions() {
+        let mut env = create_test_env_empty();
+        let id = add_session(&mut env.view, "acp-one");
+        env.view.mutate_instance(&id, |inst| {
+            inst.view = crate::session::View::Structured;
+        });
+        env.view.flat_items = env.view.build_flat_items();
+        env.view.cursor = 0;
+        env.view.update_selected();
+        let out = render_footer(&mut env);
+        assert!(
+            !out.contains("⇥"),
+            "structured view rows must not show a Tab hint at all.\n{out}"
+        );
+        assert!(
+            out.contains("↵  Attach"),
+            "structured rows keep the plain Enter attach label.\n{out}"
+        );
+    }
 }
 
 mod save_field_merge {
