@@ -6,7 +6,7 @@
 // blocks the save with an inline error.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ScheduledJobsWidget } from "../ScheduledJobsWidget";
 import { validateCron } from "../cronValidation";
 
@@ -125,6 +125,27 @@ it("adds a job and saves the full array with a generated id and built cron", () 
       group: "Scheduled",
     },
   ]);
+});
+
+it("keeps the editor open when save is rejected and closes it once save succeeds", async () => {
+  const save = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Daily triage" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Review open PRs" } });
+
+  // A rejected save keeps the form open with the draft intact, so the entry is
+  // not lost.
+  fireEvent.click(screen.getByText("Save job"));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(screen.getByText("Save job")).toBeTruthy();
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Daily triage");
+
+  // A successful save closes the editor back to the list.
+  fireEvent.click(screen.getByText("Save job"));
+  await waitFor(() => expect(screen.queryByText("Save job")).toBeNull());
+  expect(screen.getByText("+ Add scheduled job")).toBeTruthy();
 });
 
 it("blocks save and shows an error for an invalid raw cron", () => {

@@ -493,9 +493,9 @@ export function ScheduledJobsWidget({ descriptor, value, save }: CustomWidgetPro
   // null = no form open; "new" = adding; otherwise the id being edited.
   const [editing, setEditing] = useState<string | null>(null);
 
-  const persist = (next: ScheduledJob[]) => void save(next);
+  const persist = async (next: ScheduledJob[]) => (await save(next)) !== false;
 
-  const submitDraft = (draft: JobDraft) => {
+  const submitDraft = async (draft: JobDraft) => {
     const base = {
       name: draft.name.trim(),
       schedule: draft.schedule.trim(),
@@ -510,7 +510,7 @@ export function ScheduledJobsWidget({ descriptor, value, save }: CustomWidgetPro
     };
     if (draft.id === null) {
       const job: ScheduledJob = { id: crypto.randomUUID(), owner_profile: "", ...base };
-      persist([...jobs, job]);
+      if (await persist([...jobs, job])) setEditing(null);
     } else {
       const existing = jobs.find((j) => j.id === draft.id);
       const job: ScheduledJob = {
@@ -518,9 +518,8 @@ export function ScheduledJobsWidget({ descriptor, value, save }: CustomWidgetPro
         owner_profile: existing?.owner_profile ?? "",
         ...base,
       };
-      persist(jobs.map((j) => (j.id === draft.id ? job : j)));
+      if (await persist(jobs.map((j) => (j.id === draft.id ? job : j)))) setEditing(null);
     }
-    setEditing(null);
   };
 
   const toggle = (id: string) => persist(jobs.map((j) => (j.id === id ? { ...j, enabled: !j.enabled } : j)));
