@@ -259,6 +259,7 @@ pub const CLI_COMMAND_NAMES: &[&str] = &[
     "killall",
     "session",
     "group",
+    "schedule",
     "plugin",
     "profile",
     "project",
