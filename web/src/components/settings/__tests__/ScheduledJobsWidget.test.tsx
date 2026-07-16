@@ -4,11 +4,78 @@
 // picker generates a 5-field expression from a preset, adding a job persists the
 // full array with a generated id and the built cron, and an invalid raw cron
 // blocks the save with an inline error.
+//
+// The tool / agent / model / approval-mode / project fields are capability-driven
+// pickers (#2887): tool and agent come from the wizard's agent list
+// (GET /api/agents), model and approval mode from the recall catalog each agent
+// advertised (GET /api/acp/option-catalog), the project from the registry
+// (GET /api/projects) plus the shared directory browser, and the group from a
+// datalist of existing groups (GET /api/groups) that still accepts a new name.
+// All four sources are mocked here the way the sibling AcpDefaultsWidget test
+// mocks the api module.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ScheduledJobsWidget } from "../ScheduledJobsWidget";
 import { validateCron } from "../cronValidation";
+import * as api from "../../../lib/api";
+import type { AgentInfo } from "../../../lib/types";
+
+vi.mock("../../../lib/api", () => ({
+  fetchAgents: vi.fn(),
+  fetchAcpOptionCatalog: vi.fn(),
+  fetchProjects: vi.fn(),
+  fetchGroups: vi.fn(),
+  getHomePath: vi.fn(),
+  browseFilesystem: vi.fn(),
+}));
+
+function agent(name: string, over: Partial<AgentInfo> = {}): AgentInfo {
+  return {
+    name,
+    kind: "builtin",
+    binary: name,
+    host_only: false,
+    installed: true,
+    install_hint: "",
+    acp_capable: true,
+    acp_installed: true,
+    ...over,
+  };
+}
+
+// codex advertises model + mode choices; claude has no catalog entry, so its
+// model / approval-mode fields degrade to free text.
+const CATALOG = {
+  version: 1,
+  agents: {
+    codex: {
+      updated_at: "2026-01-01T00:00:00Z",
+      options: [
+        {
+          id: "model",
+          name: "Model",
+          category: "model" as const,
+          current_value: "",
+          options: [
+            { value: "gpt-5", name: "GPT-5" },
+            { value: "gpt-5-mini", name: "GPT-5 mini" },
+          ],
+        },
+        {
+          id: "mode",
+          name: "Mode",
+          category: "mode" as const,
+          current_value: "",
+          options: [
+            { value: "plan", name: "Plan" },
+            { value: "yolo", name: "Yolo" },
+          ],
+        },
+      ],
+    },
+  },
+};
 
 const DESCRIPTOR = {
   section: "scheduling",
@@ -25,6 +92,23 @@ const DESCRIPTOR = {
 
 beforeEach(() => {
   vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000000");
+  vi.mocked(api.fetchAgents).mockResolvedValue([
+    agent("claude"),
+    agent("codex"),
+    agent("gemini", { installed: false }),
+  ]);
+  vi.mocked(api.fetchAcpOptionCatalog).mockResolvedValue(CATALOG);
+  vi.mocked(api.fetchProjects).mockResolvedValue([{ name: "repo", path: "/repo", scope: "global", pinned: false }]);
+  vi.mocked(api.fetchGroups).mockResolvedValue([
+    { path: "Nightly", session_count: 2 },
+    { path: "Scheduled", session_count: 1 },
+  ]);
+  vi.mocked(api.getHomePath).mockResolvedValue("/home");
+  vi.mocked(api.browseFilesystem).mockResolvedValue({
+    entries: [{ name: "myrepo", path: "/home/myrepo", is_dir: true, is_git_repo: true }],
+    has_more: false,
+    ok: true,
+  });
 });
 
 afterEach(() => {
@@ -274,6 +358,8 @@ it("requires name, prompt, and tool before saving", () => {
   expect(screen.getByText("Prompt is required.")).toBeTruthy();
 
   fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "do it" } });
+  // The tool picker always carries the empty "Select a tool…" choice, so a user
+  // can clear it and the required-field guard still fires.
   fireEvent.change(screen.getByLabelText("Tool"), { target: { value: "" } });
   fireEvent.click(screen.getByText("Save job"));
   expect(screen.getByText("Tool is required.")).toBeTruthy();
@@ -281,18 +367,47 @@ it("requires name, prompt, and tool before saving", () => {
   expect(save).not.toHaveBeenCalled();
 });
 
-it("persists every optional field and the in-form enabled toggle", () => {
+it("selecting an agent swaps its capability fields to catalog-driven dropdowns", async () => {
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  // claude has no cached options, so model/approval start as free-text inputs.
+  await waitFor(() => expect((screen.getByLabelText("Tool") as HTMLSelectElement).value).toBe("claude"));
+  expect((screen.getByLabelText("Model") as HTMLElement).tagName).toBe("INPUT");
+  expect((screen.getByLabelText("Approval mode") as HTMLElement).tagName).toBe("INPUT");
+
+  // Switching to codex (which advertised choices) turns them into dropdowns.
+  fireEvent.change(screen.getByLabelText("Tool"), { target: { value: "codex" } });
+
+  const model = screen.getByLabelText("Model") as HTMLSelectElement;
+  const mode = screen.getByLabelText("Approval mode") as HTMLSelectElement;
+  expect(model.tagName).toBe("SELECT");
+  expect(mode.tagName).toBe("SELECT");
+  expect(within(model).getByRole("option", { name: "GPT-5" })).toBeTruthy();
+  expect(within(model).getByRole("option", { name: "Agent default" })).toBeTruthy();
+  expect(within(mode).getByRole("option", { name: "Plan" })).toBeTruthy();
+  expect(within(mode).getByRole("option", { name: "Default (agent bypass)" })).toBeTruthy();
+});
+
+it("persists an advertised model/mode, a registered project, and a chosen group", async () => {
   const save = vi.fn();
   render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
   fireEvent.click(screen.getByText("+ Add scheduled job"));
 
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Full job" } });
   fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "work" } });
+
+  // Wait for the agent list to load, then drive the capability pickers.
+  await waitFor(() =>
+    expect(within(screen.getByLabelText("Tool") as HTMLElement).getByRole("option", { name: "codex" })).toBeTruthy(),
+  );
   fireEvent.change(screen.getByLabelText("Tool"), { target: { value: "codex" } });
-  fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "codex-agent" } });
   fireEvent.change(screen.getByLabelText("Model"), { target: { value: "gpt-5" } });
-  fireEvent.change(screen.getByLabelText("Approval mode"), { target: { value: "yolo" } });
+  fireEvent.change(screen.getByLabelText("Approval mode"), { target: { value: "plan" } });
+
+  await screen.findByRole("option", { name: "repo (/repo)" });
   fireEvent.change(screen.getByLabelText("Project"), { target: { value: "/repo" } });
+
   fireEvent.change(screen.getByLabelText("Group"), { target: { value: "Nightly" } });
   fireEvent.click(screen.getByLabelText("Enabled"));
 
@@ -306,9 +421,8 @@ it("persists every optional field and the in-form enabled toggle", () => {
       schedule: "0 8 * * *",
       enabled: false,
       tool: "codex",
-      agent: "codex-agent",
       model: "gpt-5",
-      approval_mode: "yolo",
+      approval_mode: "plan",
       project: "/repo",
       prompt: "work",
       group: "Nightly",
@@ -316,7 +430,7 @@ it("persists every optional field and the in-form enabled toggle", () => {
   ]);
 });
 
-it("omits blank optional fields and defaults the group when project is left empty", () => {
+it("omits blank optional fields and defaults the group when project is left as scratch", () => {
   const save = vi.fn();
   render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
   fireEvent.click(screen.getByText("+ Add scheduled job"));
@@ -331,7 +445,55 @@ it("omits blank optional fields and defaults the group when project is left empt
   const job = persisted[0];
   expect(job.project).toBeUndefined();
   expect(job.agent).toBeUndefined();
+  expect(job.model).toBeUndefined();
+  expect(job.approval_mode).toBeUndefined();
   expect(job.group).toBe("Scheduled");
+});
+
+it("suggests existing groups in a datalist while still accepting a new name", async () => {
+  const save = vi.fn();
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  // The datalist offers the existing group names once /api/groups resolves.
+  await waitFor(() => {
+    const opts = Array.from(document.querySelectorAll("#scheduled-job-groups option")).map(
+      (o) => (o as HTMLOptionElement).value,
+    );
+    expect(opts).toContain("Nightly");
+    expect(opts).toContain("Scheduled");
+  });
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Custom group job" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "go" } });
+  // A brand-new name that is not in the suggestions is still accepted.
+  fireEvent.change(screen.getByLabelText("Group"), { target: { value: "Brand New" } });
+
+  fireEvent.click(screen.getByText("Save job"));
+
+  const [[persisted]] = save.mock.calls;
+  expect(persisted[0].group).toBe("Brand New");
+});
+
+it("browses the filesystem to select a project directory", async () => {
+  const save = vi.fn();
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Browsed" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "go" } });
+
+  // Opening the browse sentinel mounts the shared directory browser.
+  fireEvent.change(screen.getByLabelText("Project"), { target: { value: "__browse__" } });
+  const repo = await screen.findByText("myrepo");
+  fireEvent.click(repo);
+
+  // Selecting a repo closes the browser and stamps the path onto the job.
+  await waitFor(() => expect(screen.queryByText("myrepo")).toBeNull());
+  fireEvent.click(screen.getByText("Save job"));
+
+  const [[persisted]] = save.mock.calls;
+  expect(persisted[0].project).toBe("/home/myrepo");
 });
 
 it("edits an existing job and persists the update in place", () => {
