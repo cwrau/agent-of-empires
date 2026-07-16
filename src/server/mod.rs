@@ -15,6 +15,8 @@ mod pane;
 pub mod push;
 pub mod push_send;
 pub mod rate_limit;
+#[cfg(feature = "serve")]
+pub mod scheduler;
 pub(crate) mod session_spawn;
 pub mod tunnel;
 
@@ -1202,6 +1204,19 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
             status_poll_loop(poll_state).await;
         },
     );
+
+    // Scheduled-session cron loop (#2886): fires the profile's scheduled jobs.
+    #[cfg(feature = "serve")]
+    {
+        let schedule_state = state.clone();
+        crate::task_util::spawn_supervised(
+            "server.schedule_loop",
+            crate::task_util::PanicPolicy::Log,
+            async move {
+                scheduler::schedule_loop(schedule_state).await;
+            },
+        );
+    }
 
     // File-watch wire-up: register the initial per-profile subscriptions
     // BEFORE the server starts serving requests so cold-start writes do not
