@@ -22,6 +22,7 @@ use super::plugin::PluginCommands;
 use super::profile::ProfileCommands;
 use super::project::ProjectCommands;
 use super::remove::RemoveArgs;
+use super::schedule::ScheduleCommands;
 use super::send::SendArgs;
 #[cfg(feature = "serve")]
 use super::serve::ServeArgs;
@@ -126,6 +127,12 @@ pub enum Commands {
     Group {
         #[command(subcommand)]
         command: GroupCommands,
+    },
+
+    /// Manage cron-scheduled sessions
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommands,
     },
 
     /// Manage plugins (list, info, enable, disable, install, update, uninstall)
@@ -297,6 +304,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Stop { .. } => return None,
         Commands::Session { .. } => "session",
         Commands::Group { .. } => "group",
+        Commands::Schedule { .. } => "schedule",
         Commands::Plugin { .. } => "plugin",
         Commands::Profile { .. } => "profile",
         Commands::Project { .. } => "project",

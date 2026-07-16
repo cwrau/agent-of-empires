@@ -341,6 +341,7 @@ async fn main() -> Result<()> {
         Some(Commands::Killall(args)) => cli::killall::run(args).await,
         Some(Commands::Session { command }) => cli::session::run(&profile, command).await,
         Some(Commands::Group { command }) => cli::group::run(&profile, command).await,
+        Some(Commands::Schedule { command }) => cli::schedule::run(&profile, command).await,
         Some(Commands::Plugin { command }) => cli::plugin::run(command).await,
         Some(Commands::Profile { command }) => cli::profile::run(&profile, command).await,
         Some(Commands::Project { command }) => {

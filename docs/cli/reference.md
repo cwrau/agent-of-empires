@@ -43,6 +43,12 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe group create`↴](#aoe-group-create)
 * [`aoe group delete`↴](#aoe-group-delete)
 * [`aoe group move`↴](#aoe-group-move)
+* [`aoe schedule`↴](#aoe-schedule)
+* [`aoe schedule list`↴](#aoe-schedule-list)
+* [`aoe schedule add`↴](#aoe-schedule-add)
+* [`aoe schedule remove`↴](#aoe-schedule-remove)
+* [`aoe schedule enable`↴](#aoe-schedule-enable)
+* [`aoe schedule disable`↴](#aoe-schedule-disable)
 * [`aoe plugin`↴](#aoe-plugin)
 * [`aoe plugin list`↴](#aoe-plugin-list)
 * [`aoe plugin info`↴](#aoe-plugin-info)
@@ -132,6 +138,7 @@ Run without arguments to launch the TUI dashboard.
 * `killall` — Force-stop everything aoe is running: the serve daemon, all agent workers, and all aoe tmux sessions. Destructive and unprompted
 * `session` — Manage session lifecycle (start, stop, attach, etc.)
 * `group` — Manage groups for organizing sessions
+* `schedule` — Manage cron-scheduled sessions
 * `plugin` — Manage plugins (list, info, enable, disable, install, update, uninstall)
 * `profile` — Manage profiles (separate workspaces)
 * `project` — Manage the project registry used by multi-repo session pickers
@@ -742,6 +749,95 @@ Move session to group
 
 * `<IDENTIFIER>` — Session ID or title
 * `<GROUP>` — Target group
+
+
+
+## `aoe schedule`
+
+Manage cron-scheduled sessions
+
+**Usage:** `aoe schedule <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` — List scheduled jobs
+* `add` — Add a scheduled job
+* `remove` — Remove a scheduled job by id or name
+* `enable` — Enable a scheduled job by id or name
+* `disable` — Disable a scheduled job by id or name
+
+
+
+## `aoe schedule list`
+
+List scheduled jobs
+
+**Usage:** `aoe schedule list [OPTIONS]`
+
+###### **Options:**
+
+* `--json` — Emit JSON instead of a table
+
+
+
+## `aoe schedule add`
+
+Add a scheduled job
+
+**Usage:** `aoe schedule add [OPTIONS] --name <NAME> --cron <CRON> --prompt <PROMPT>`
+
+###### **Options:**
+
+* `--name <NAME>` — Display name for the job (also titles the spawned session)
+* `--cron <CRON>` — Cron expression, host-local time (e.g. "0 8 * * *" for 8am daily)
+* `--prompt <PROMPT>` — The prompt delivered to the session when it starts
+* `--tool <TOOL>` — Tool / built-in agent key
+
+  Default value: `claude`
+* `--agent <AGENT>` — Structured-view agent name, when different from the tool
+* `--model <MODEL>` — Model override
+* `--approval-mode <APPROVAL_MODE>` — ACP session-mode applied post-spawn (e.g. a read-only / plan mode) so the unattended run does not block on approvals. Omit to use the agent's default bypass mode
+* `--project <PROJECT>` — Project path to run in. Omit for a scratch (project-less) session
+* `--group <GROUP>` — Group the spawned session is filed under
+
+  Default value: `Scheduled`
+* `--disabled` — Add the job disabled (does not fire until enabled)
+
+
+
+## `aoe schedule remove`
+
+Remove a scheduled job by id or name
+
+**Usage:** `aoe schedule remove <TARGET>`
+
+###### **Arguments:**
+
+* `<TARGET>` — Job id or unique name
+
+
+
+## `aoe schedule enable`
+
+Enable a scheduled job by id or name
+
+**Usage:** `aoe schedule enable <TARGET>`
+
+###### **Arguments:**
+
+* `<TARGET>` — Job id or unique name
+
+
+
+## `aoe schedule disable`
+
+Disable a scheduled job by id or name
+
+**Usage:** `aoe schedule disable <TARGET>`
+
+###### **Arguments:**
+
+* `<TARGET>` — Job id or unique name
 
 
 

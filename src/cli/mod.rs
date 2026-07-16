@@ -20,6 +20,7 @@ pub mod plugin;
 pub mod profile;
 pub mod project;
 pub mod remove;
+pub mod schedule;
 pub mod send;
 #[cfg(feature = "serve")]
 pub mod serve;
