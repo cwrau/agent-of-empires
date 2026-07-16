@@ -72,6 +72,35 @@ it("Weekly preset generates a day-of-week cron", () => {
   expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("30 9 * * 1");
 });
 
+it("opens an existing weekly job on its own frequency and preserves the schedule", () => {
+  const save = vi.fn();
+  const job = {
+    id: "job-1",
+    owner_profile: "",
+    name: "Weekly report",
+    schedule: "30 9 * * 1",
+    enabled: true,
+    tool: "claude",
+    prompt: "summarize",
+    group: "Scheduled",
+  };
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[job]} save={save} />);
+
+  fireEvent.click(screen.getByText("Edit"));
+
+  // The picker opens on Weekly (not the default Daily), so weekly-only controls
+  // are present and the raw cron is untouched.
+  expect((screen.getByLabelText("Frequency") as HTMLSelectElement).value).toBe("weekly");
+  expect((screen.getByLabelText("Day of week") as HTMLSelectElement).value).toBe("1");
+  expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("30 9 * * 1");
+
+  // Editing an unrelated field does not silently rewrite the schedule as daily.
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Renamed" } });
+  fireEvent.click(screen.getByText("Save job"));
+
+  expect(save).toHaveBeenCalledWith([{ ...job, name: "Renamed" }]);
+});
+
 it("adds a job and saves the full array with a generated id and built cron", () => {
   const save = vi.fn();
   render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);

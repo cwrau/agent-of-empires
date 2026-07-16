@@ -68,6 +68,37 @@ function parseTime(time: string): { h: number; m: number } {
   return { h: Number(hh) || 0, m: Number(mm) || 0 };
 }
 
+/** Derive the picker state that produced `schedule`, so editing an existing job
+ *  opens on its real frequency instead of the default Daily. Recognizes the
+ *  same shapes `buildCron` emits; anything else falls back to `custom` with the
+ *  raw expression left untouched. */
+function parsePicker(schedule: string): PickerState {
+  const fields = schedule.trim().split(/\s+/);
+  const [min, hour, dom, mon, dow] = fields;
+  if (fields.length === 5 && min && hour && dom && mon && dow) {
+    const everyN = /^\*\/(\d+)$/.exec(min);
+    if (everyN && hour === "*" && dom === "*" && mon === "*" && dow === "*") {
+      const n = Number(everyN[1]);
+      if (n >= 1 && n <= 59) return { ...DEFAULT_PICKER, frequency: "minutes", everyN: n };
+    }
+    if (dom === "*" && mon === "*") {
+      const m = Number(min);
+      const minuteOk = /^\d+$/.test(min) && m >= 0 && m <= 59;
+      if (minuteOk && hour === "*" && dow === "*") {
+        return { ...DEFAULT_PICKER, frequency: "hourly", minute: m };
+      }
+      const h = Number(hour);
+      const hourOk = /^\d+$/.test(hour) && h >= 0 && h <= 23;
+      if (minuteOk && hourOk) {
+        const time = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+        if (dow === "*") return { ...DEFAULT_PICKER, frequency: "daily", time };
+        if (/^[0-6]$/.test(dow)) return { ...DEFAULT_PICKER, frequency: "weekly", time, weekday: dow };
+      }
+    }
+  }
+  return { ...DEFAULT_PICKER, frequency: "custom" };
+}
+
 /** Build the 5-field cron string a preset describes. `custom` returns null so
  *  the caller leaves the raw field alone. */
 function buildCron(p: PickerState): string | null {
@@ -149,7 +180,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function CronPicker({ schedule, onScheduleChange }: { schedule: string; onScheduleChange: (next: string) => void }) {
-  const [picker, setPicker] = useState<PickerState>(DEFAULT_PICKER);
+  const [picker, setPicker] = useState<PickerState>(() => parsePicker(schedule));
 
   const apply = (next: PickerState) => {
     setPicker(next);
