@@ -7,6 +7,7 @@ use crate::session::config::{
     AcpConfig, AuthConfig, DiffConfig, LoggingConfig, SandboxConfig, SessionConfig,
     TelemetryConfig, ThemeConfig, TmuxConfig, UpdatesConfig, WebConfig, WorktreeConfig,
 };
+use crate::session::schedule::SchedulingConfig;
 use crate::sound::SoundConfig;
 use crate::status_hooks::StatusHookConfig;
 
@@ -27,6 +28,7 @@ pub fn schema() -> Vec<FieldDescriptor> {
     out.extend(AcpConfig::settings_descriptors());
     out.extend(DiffConfig::settings_descriptors());
     out.extend(LoggingConfig::settings_descriptors());
+    out.extend(SchedulingConfig::settings_descriptors());
     out
 }
 

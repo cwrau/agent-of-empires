@@ -390,6 +390,11 @@ impl SettingsView {
             push_tab(&mut rows, SettingsCategory::Telemetry);
         }
         push_tab(&mut rows, SettingsCategory::Logging);
+        // Scheduled jobs live in the global config (tagged with their owning
+        // profile), so the tab only appears under Global scope.
+        if scope == SettingsScope::Global {
+            push_tab(&mut rows, SettingsCategory::Scheduling);
+        }
         // Plugin enable/disable is stored in the global config, so the manager
         // tab (which stages toggles into it) only appears under Global scope.
         if scope == SettingsScope::Global {

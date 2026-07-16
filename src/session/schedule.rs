@@ -10,6 +10,7 @@
 //! Cron expressions are interpreted in the daemon host's local time. Moving the
 //! daemon to a machine in another timezone changes when a job fires.
 
+use aoe_settings_derive::SettingsSection;
 use serde::{Deserialize, Serialize};
 
 /// Group scheduled sessions land in by default, so they do not muddle with
@@ -105,9 +106,18 @@ impl ScheduledJob {
 }
 
 /// The `[scheduling]` config section: the list of jobs for this scope.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, SettingsSection)]
+#[setting_section(name = "scheduling", category = "Scheduling")]
 pub struct SchedulingConfig {
+    /// The scheduled jobs. Edited through a dedicated cron-job widget on every
+    /// surface; global-only since jobs are stored at global scope and tagged
+    /// with their owning profile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[setting(
+        label = "Scheduled Jobs",
+        widget = "custom:scheduled-jobs",
+        global_only
+    )]
     pub jobs: Vec<ScheduledJob>,
 }
 

@@ -52,6 +52,7 @@ pub enum SettingsCategory {
     Acp,
     Diff,
     Logging,
+    Scheduling,
     Plugins,
 }
 
@@ -74,6 +75,7 @@ impl SettingsCategory {
             Self::Acp => "Acp",
             Self::Diff => "Diff",
             Self::Logging => "Logging",
+            Self::Scheduling => "Scheduling",
             Self::Plugins => "Plugins",
         }
     }
@@ -99,6 +101,7 @@ impl SettingsCategory {
             Self::Diff => "Diff",
             Self::Telemetry => "Telemetry",
             Self::Logging => "Logging",
+            Self::Scheduling => "Scheduling",
             Self::Plugins => "Plugins",
         }
     }
@@ -527,6 +530,17 @@ fn custom_value_from_json(id: &str, current: &Value) -> FieldValue {
             };
             FieldValue::Text(text)
         }
+        "scheduled-jobs" => {
+            // The web widget offers the rich cron picker; the TUI keeps parity
+            // by editing the job list as raw JSON (an array of job objects),
+            // validated on commit so a typo cannot wipe the list.
+            let text = if current.is_null() {
+                "[]".to_string()
+            } else {
+                serde_json::to_string(current).unwrap_or_else(|_| "[]".to_string())
+            };
+            FieldValue::Text(text)
+        }
         // logging-targets is expanded into per-target rows during build and
         // never lands here.
         _ => FieldValue::Text(String::new()),
@@ -646,6 +660,16 @@ fn custom_value_to_json(id: &str, value: &FieldValue) -> Value {
             match serde_json::from_str::<Value>(trimmed) {
                 Ok(v) if v.is_object() => v,
                 _ => json!({}),
+            }
+        }
+        ("scheduled-jobs", FieldValue::Text(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return json!([]);
+            }
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(v) if v.is_array() => v,
+                _ => json!([]),
             }
         }
         _ => Value::Null,
