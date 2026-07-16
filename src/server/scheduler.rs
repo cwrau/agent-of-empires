@@ -11,10 +11,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::acp::state::Event;
 use crate::server::session_spawn::{spawn_structured_session, StructuredSessionSpec};
+use crate::server::AcpBroadcastFrame;
 use crate::session::schedule::{plan_tick, Cursors, ScheduledJob, DEFAULT_SCHEDULE_GROUP};
 
 use super::AppState;
@@ -23,6 +26,12 @@ use super::AppState;
 /// prompt before we give up, so a worker that never starts cannot wedge the
 /// per-job task forever.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Upper bound on how long a single fired run is held in flight while waiting
+/// for its turn to complete. Prevents a session that never emits `Stopped` (a
+/// crashed worker, a dropped broadcast) from pinning the in-flight guard and
+/// silently disabling the job forever.
+const RUN_MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 /// The supervised tick loop. Runs until `state.shutdown` is cancelled.
 pub async fn schedule_loop(state: Arc<AppState>) {
@@ -59,15 +68,16 @@ pub async fn schedule_loop(state: Arc<AppState>) {
         // Only run jobs this daemon owns, that individually validate, and whose
         // id is unique. A malformed job (e.g. a cron typo added via the settings
         // UI, which does not re-validate cron server-side) is skipped and logged
-        // rather than halting every job. An empty owner is a job added without a
-        // profile; run it. A job owned by another profile is left to that
-        // profile's daemon so multiple daemons do not double-fire.
+        // rather than halting every job. Ownership is an exact match on the
+        // profile: a job with no owner never fires (the CLI and the save path
+        // both stamp a concrete owner), so multiple profile daemons can never
+        // double-fire the same job.
         let mut seen_ids = std::collections::HashSet::new();
         let owned: Vec<ScheduledJob> = cfg
             .scheduling
             .jobs
             .into_iter()
-            .filter(|j| j.owner_profile.is_empty() || j.owner_profile == state.profile)
+            .filter(|j| j.owner_profile == state.profile)
             .filter(|j| match j.validate() {
                 Ok(()) => true,
                 Err(e) => {
@@ -176,13 +186,33 @@ async fn run_job(state: &Arc<AppState>, job: &ScheduledJob) {
             return;
         }
     };
-    let id = outcome.instance.id;
+    let id = outcome.instance.id.clone();
+
+    // The spawn core downgrades a tool that cannot run over ACP to a terminal
+    // session. Delivering an ACP prompt to it would never reach the agent and
+    // would leave an idle session, so stop here (the session is still visible in
+    // the Scheduled group for the user to inspect and delete).
+    if !outcome.instance.is_structured() {
+        warn!(
+            target: "server.scheduler",
+            job = %job.id,
+            session = %id,
+            "tool '{}' is not structured-view capable; created the session but did not deliver the prompt",
+            job.tool
+        );
+        return;
+    }
+
     info!(
         target: "server.scheduler",
         job = %job.id,
         session = %id,
         "fired scheduled session"
     );
+
+    // Subscribe before sending so the turn-end wait below cannot miss a fast
+    // `Stopped`.
+    let mut events = state.acp_events_tx.subscribe();
 
     // Apply the session mode before the prompt so approvals are handled per the
     // job's policy. An explicit approval_mode wins; otherwise fall back to the
@@ -201,11 +231,24 @@ async fn run_job(state: &Arc<AppState>, job: &ScheduledJob) {
     };
     if let Some(mode_id) = mode_id {
         if let Err(e) = state.acp_supervisor.set_mode(&id, &mode_id).await {
+            // An explicit mode that fails to apply must not be silently ignored:
+            // the run would proceed under an unverified permission mode. Abort
+            // prompt delivery instead. A failed fallback reassert (None case) is
+            // non-fatal since the spawn already requested the bypass mode.
+            if job.approval_mode.is_some() {
+                warn!(
+                    target: "server.scheduler",
+                    job = %job.id,
+                    session = %id,
+                    "explicit approval mode '{mode_id}' failed to apply; not delivering the prompt: {e}"
+                );
+                return;
+            }
             warn!(
                 target: "server.scheduler",
                 job = %job.id,
                 session = %id,
-                "set_mode({mode_id}) failed: {e}"
+                "default mode reassert failed (continuing): {e}"
             );
         }
     }
@@ -223,19 +266,64 @@ async fn run_job(state: &Arc<AppState>, job: &ScheduledJob) {
     .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => warn!(
-            target: "server.scheduler",
-            job = %job.id,
-            session = %id,
-            "send_prompt failed: {e}"
-        ),
-        Err(_) => warn!(
-            target: "server.scheduler",
-            job = %job.id,
-            session = %id,
-            "send_prompt timed out after {}s",
-            PROMPT_TIMEOUT.as_secs()
-        ),
+        Ok(Err(e)) => {
+            warn!(
+                target: "server.scheduler",
+                job = %job.id,
+                session = %id,
+                "send_prompt failed: {e}"
+            );
+            return;
+        }
+        Err(_) => {
+            warn!(
+                target: "server.scheduler",
+                job = %job.id,
+                session = %id,
+                "send_prompt timed out after {}s",
+                PROMPT_TIMEOUT.as_secs()
+            );
+            return;
+        }
+    }
+
+    // Hold the job in flight until the turn it just started actually completes,
+    // so a later cron occurrence cannot spawn an overlapping run. Bounded by
+    // RUN_MAX_LIFETIME so a session that never emits `Stopped` cannot pin the
+    // guard forever.
+    wait_for_turn_end(&mut events, &id).await;
+}
+
+/// Block until the session emits a terminal turn signal (`Stopped` or a startup
+/// failure), the broadcast closes, or `RUN_MAX_LIFETIME` elapses.
+async fn wait_for_turn_end(
+    events: &mut tokio::sync::broadcast::Receiver<AcpBroadcastFrame>,
+    id: &str,
+) {
+    let deadline = tokio::time::sleep(RUN_MAX_LIFETIME);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                warn!(
+                    target: "server.scheduler",
+                    session = %id,
+                    "run exceeded {}s without a turn-end signal; releasing the in-flight guard",
+                    RUN_MAX_LIFETIME.as_secs()
+                );
+                return;
+            }
+            recv = events.recv() => match recv {
+                Ok(frame) if frame.session_id == id => {
+                    if matches!(&*frame.event, Event::Stopped { .. } | Event::AgentStartupError { .. }) {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => return,
+            },
+        }
     }
 }
 
