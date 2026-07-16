@@ -387,6 +387,18 @@
       ]
     },
     {
+      "id": "settings.scheduled-jobs",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/settings/__tests__/ScheduledJobsWidget.test.tsx"],
+      "components": [
+        "web/src/components/settings/ScheduledJobsWidget.tsx",
+        "web/src/components/settings/cronValidation.ts",
+        "web/src/components/settings/customWidgetRegistry.ts",
+        "web/src/components/SettingsView.tsx"
+      ]
+    },
+    {
       "id": "settings.schema-persistence",
       "kind": "live-playwright",
       "risk": "medium",

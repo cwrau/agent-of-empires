@@ -44,6 +44,7 @@ export type TabId =
   | "structured-view"
   | "mcp"
   | "logging"
+  | "scheduling"
   | "plugins";
 
 type SidebarItem = { kind: "tab"; id: TabId; label: string; icon?: ReactNode } | { kind: "divider"; label: string };
@@ -106,6 +107,7 @@ export function buildSidebar(): SidebarItem[] {
     { kind: "tab", id: "updates", label: "Updates" },
     { kind: "tab", id: "telemetry", label: "Telemetry" },
     { kind: "tab", id: "logging", label: "Logging" },
+    { kind: "tab", id: "scheduling", label: "Scheduling" },
     { kind: "tab", id: "plugins", label: "Plugins" },
   ];
 }
@@ -144,6 +146,7 @@ const ALL_TAB_IDS = new Set<TabId>([
   "structured-view",
   "mcp",
   "logging",
+  "scheduling",
   "plugins",
 ]);
 
@@ -167,6 +170,7 @@ const SCHEMA_BACKED_TABS = new Set<TabId>([
   "logging",
   "notifications",
   "structured-view",
+  "scheduling",
 ]);
 
 /// Resolves the value `selectedProfile` should take when the mount-time
@@ -549,6 +553,16 @@ export function SettingsView({
             values={(settings?.logging ?? {}) as Record<string, unknown>}
             onSaveField={saveSubField}
             advancedSubtitle="Sink and rotation; some fields require restarting aoe to take effect."
+          />
+        );
+      case "scheduling":
+        return (
+          <SchemaSection
+            section="scheduling"
+            schema={schema}
+            focusRequest={focusRequest}
+            values={(settings?.scheduling ?? {}) as Record<string, unknown>}
+            onSaveField={saveSubField}
           />
         );
 

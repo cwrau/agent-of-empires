@@ -1,0 +1,132 @@
+// @vitest-environment jsdom
+//
+// Behavioral coverage for the scheduled-jobs settings widget (#2886): the cron
+// picker generates a 5-field expression from a preset, adding a job persists the
+// full array with a generated id and the built cron, and an invalid raw cron
+// blocks the save with an inline error.
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { ScheduledJobsWidget } from "../ScheduledJobsWidget";
+import { validateCron } from "../cronValidation";
+
+const DESCRIPTOR = {
+  section: "scheduling",
+  field: "jobs",
+  category: "Scheduling",
+  label: "Scheduled Jobs",
+  description: "",
+  widget: { kind: "custom" as const, id: "scheduled-jobs" },
+  web_write: { policy: "allow" as const },
+  profile_overridable: false,
+  validation: { rule: "none" as const },
+  advanced: false,
+};
+
+beforeEach(() => {
+  vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000000");
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe("validateCron", () => {
+  it("accepts picker-generated expressions", () => {
+    expect(validateCron("0 8 * * *")).toBeNull();
+    expect(validateCron("*/30 * * * *")).toBeNull();
+    expect(validateCron("30 9 * * 1")).toBeNull();
+  });
+
+  it("rejects wrong field count and out-of-range values", () => {
+    expect(validateCron("0 8 * *")).toMatch(/exactly 5 fields/);
+    expect(validateCron("99 8 * * *")).toMatch(/minute/);
+    expect(validateCron("0 25 * * *")).toMatch(/hour/);
+  });
+});
+
+it("cron picker generates the cron string for the Daily preset", () => {
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  const cron = screen.getByLabelText("Cron expression") as HTMLInputElement;
+  const time = screen.getByLabelText("Time") as HTMLInputElement;
+
+  // Prove the picker drives the raw field, not just the seed default.
+  fireEvent.change(time, { target: { value: "23:59" } });
+  expect(cron.value).toBe("59 23 * * *");
+
+  fireEvent.change(time, { target: { value: "08:00" } });
+  expect(cron.value).toBe("0 8 * * *");
+});
+
+it("Weekly preset generates a day-of-week cron", () => {
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Frequency"), { target: { value: "weekly" } });
+  fireEvent.change(screen.getByLabelText("Time"), { target: { value: "09:30" } });
+  fireEvent.change(screen.getByLabelText("Day of week"), { target: { value: "1" } });
+
+  expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("30 9 * * 1");
+});
+
+it("adds a job and saves the full array with a generated id and built cron", () => {
+  const save = vi.fn();
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Daily triage" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Review open PRs" } });
+  fireEvent.change(screen.getByLabelText("Time"), { target: { value: "08:00" } });
+
+  fireEvent.click(screen.getByText("Save job"));
+
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(save).toHaveBeenCalledWith([
+    {
+      id: "00000000-0000-0000-0000-000000000000",
+      owner_profile: "",
+      name: "Daily triage",
+      schedule: "0 8 * * *",
+      enabled: true,
+      tool: "claude",
+      prompt: "Review open PRs",
+      group: "Scheduled",
+    },
+  ]);
+});
+
+it("blocks save and shows an error for an invalid raw cron", () => {
+  const save = vi.fn();
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Broken" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "do it" } });
+  fireEvent.change(screen.getByLabelText("Cron expression"), { target: { value: "99 8 * * *" } });
+
+  fireEvent.click(screen.getByText("Save job"));
+
+  expect(save).not.toHaveBeenCalled();
+  expect(screen.getByText(/Invalid minute field/)).toBeTruthy();
+});
+
+it("toggles a job's enabled flag and persists the whole array", () => {
+  const save = vi.fn();
+  const job = {
+    id: "job-1",
+    owner_profile: "",
+    name: "Nightly",
+    schedule: "0 3 * * *",
+    enabled: true,
+    tool: "claude",
+    prompt: "run",
+    group: "Scheduled",
+  };
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[job]} save={save} />);
+
+  fireEvent.click(screen.getByLabelText("Enable Nightly"));
+  expect(save).toHaveBeenCalledWith([{ ...job, enabled: false }]);
+});

@@ -1,4 +1,5 @@
 import { AcpDefaultsWidget } from "./AcpDefaultsWidget";
+import { ScheduledJobsWidget } from "./ScheduledJobsWidget";
 import type { CustomSettingsWidget } from "./customWidgets";
 import {
   DefaultToolWidget,
@@ -21,4 +22,5 @@ export const CUSTOM_SETTINGS_WIDGETS: Record<string, CustomSettingsWidget> = {
   "sound-volume": SoundVolumeWidget,
   "logging-targets": LoggingTargetsWidget,
   "acp-defaults": AcpDefaultsWidget,
+  "scheduled-jobs": ScheduledJobsWidget,
 };
