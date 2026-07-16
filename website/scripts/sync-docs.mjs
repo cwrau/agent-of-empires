@@ -153,6 +153,13 @@ const PAGES = [
       "Launch a session in a fresh scratch directory under ~/.agent-of-empires/scratch/ with no project path. The directory is removed when the session is deleted.",
   },
   {
+    source: "docs/guides/scheduled-sessions.md",
+    dest: "guides/scheduled-sessions.md",
+    title: "Scheduled Sessions",
+    description:
+      "Run a preset prompt against an agent on a cron schedule, unattended and auto-grouped, managed from the CLI, TUI, or web dashboard.",
+  },
+  {
     source: "docs/guides/live-mode.md",
     dest: "guides/live-mode.md",
     title: "Live Mode",
@@ -438,6 +445,7 @@ const URL_MAP = {
   "docs/guides/session-fork.md": "/guides/session-fork/",
   "docs/guides/multi-repo-workspaces.md": "/guides/multi-repo-workspaces/",
   "docs/guides/scratch-sessions.md": "/guides/scratch-sessions/",
+  "docs/guides/scheduled-sessions.md": "/guides/scheduled-sessions/",
   "docs/guides/live-mode.md": "/guides/live-mode/",
   "docs/guides/tool-sessions.md": "/guides/tool-sessions/",
   "docs/guides/podman.md": "/guides/podman/",

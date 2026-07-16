@@ -31,6 +31,7 @@ export const docsNav: NavSection[] = [
       { title: "Git Worktrees", href: "/guides/worktrees/", description: "How AoE creates and cleans up a git worktree per session." },
       { title: "Multi-Repo Workspaces", href: "/guides/multi-repo-workspaces/", description: "Drive one session across several git repositories at once." },
       { title: "Scratch Sessions", href: "/guides/scratch-sessions/", description: "Throwaway sessions for quick experiments without a worktree." },
+      { title: "Scheduled Sessions", href: "/guides/scheduled-sessions/", description: "Run a preset prompt against an agent on a cron schedule, unattended." },
       { title: "Diff View", href: "/guides/diff-view/", description: "Review git changes and edit files from the TUI." },
       { title: "tmux Status Bar", href: "/guides/tmux-status-bar/", description: "Show live session status in your tmux status bar." },
       { title: "Agent Command Overrides", href: "/guides/agent-override/", description: "Customize the command used to launch each agent." },
