@@ -291,12 +291,13 @@ async fn run_job(state: &Arc<AppState>, job: &ScheduledJob) {
     // so a later cron occurrence cannot spawn an overlapping run. Bounded by
     // RUN_MAX_LIFETIME so a session that never emits `Stopped` cannot pin the
     // guard forever.
-    wait_for_turn_end(&mut events, &id).await;
+    wait_for_turn_end(state, &mut events, &id).await;
 }
 
 /// Block until the session emits a terminal turn signal (`Stopped` or a startup
 /// failure), the broadcast closes, or `RUN_MAX_LIFETIME` elapses.
 async fn wait_for_turn_end(
+    state: &Arc<AppState>,
     events: &mut tokio::sync::broadcast::Receiver<AcpBroadcastFrame>,
     id: &str,
 ) {
@@ -320,7 +321,16 @@ async fn wait_for_turn_end(
                     }
                 }
                 Ok(_) => {}
-                Err(RecvError::Lagged(_)) => {}
+                // A lagged receiver may have dropped this session's terminal
+                // frame. Reconcile against the event store: if no turn is in
+                // flight the run already finished, so release the guard rather
+                // than blocking out the full lifetime on a signal that will
+                // never arrive.
+                Err(RecvError::Lagged(_)) => {
+                    if !state.acp_event_store.has_in_flight_turn(id) {
+                        return;
+                    }
+                }
                 Err(RecvError::Closed) => return,
             },
         }
