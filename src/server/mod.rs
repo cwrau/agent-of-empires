@@ -1206,8 +1206,10 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     );
 
     // Scheduled-session cron loop (#2886): fires the profile's scheduled jobs.
+    // Skipped in read-only mode; the loop persists sessions and launches agents,
+    // which would bypass the server's read-only guarantee.
     #[cfg(feature = "serve")]
-    {
+    if !state.read_only {
         let schedule_state = state.clone();
         crate::task_util::spawn_supervised(
             "server.schedule_loop",
