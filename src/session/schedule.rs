@@ -142,6 +142,98 @@ pub fn validate_cron(expr: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// The occurrence to fire if `schedule` has a match in the half-open window
+/// `(last_check, now]`, else `None`. Returns at most one occurrence (the
+/// earliest in the window), so a delayed tick that spans several matches fires
+/// only once rather than bursting. Occurrences are interpreted in the timezone
+/// of the supplied timestamps; the scheduler passes host-local time.
+///
+/// This is the pure core of the skip-missed policy: seeding `last_check` to
+/// "now" at startup means occurrences that elapsed while the daemon was down are
+/// never in a future window and so are skipped.
+pub fn next_due<Tz: chrono::TimeZone>(
+    schedule: &str,
+    last_check: &chrono::DateTime<Tz>,
+    now: &chrono::DateTime<Tz>,
+) -> Option<chrono::DateTime<Tz>> {
+    let cron = croner::Cron::new(schedule).parse().ok()?;
+    let next = cron.find_next_occurrence(last_check, false).ok()?;
+    if next <= *now {
+        Some(next)
+    } else {
+        None
+    }
+}
+
+/// Per-job runtime cursor. Held in memory only (never persisted): the
+/// skip-missed policy relies on cursors seeding to "now" every startup so
+/// downtime is discarded.
+#[derive(Debug, Clone)]
+pub struct JobCursor<Tz: chrono::TimeZone> {
+    /// `(enabled, schedule)` when the cursor was last seeded. A change means the
+    /// job was enabled/disabled or rescheduled, so we reseed rather than fire
+    /// retroactively.
+    fingerprint: (bool, String),
+    /// Upper bound of the last evaluated window. Advances only when the job
+    /// fires, so an occurrence is caught even if it lands between ticks.
+    last_check: chrono::DateTime<Tz>,
+}
+
+/// Cursors keyed by job id.
+pub type Cursors<Tz> = std::collections::HashMap<String, JobCursor<Tz>>;
+
+/// Pure scheduler step: given the current jobs, the prior cursors, and `now`,
+/// return the ids to fire and the updated cursor map.
+///
+/// Rules (the debate's converged semantics):
+/// - A job absent from `prev` is seeded to `now` and does NOT fire (new job /
+///   fresh daemon skips past occurrences).
+/// - A job whose `(enabled, schedule)` fingerprint changed is reseeded to `now`
+///   and does NOT fire (an edit never retroactively fires).
+/// - An unchanged enabled job fires at most once if an occurrence falls in
+///   `(last_check, now]`; on fire its cursor advances to `now`.
+/// - Disabled jobs never fire.
+/// - Cursors for jobs no longer present are dropped (only current jobs are
+///   carried forward).
+pub fn plan_tick<Tz: chrono::TimeZone>(
+    jobs: &[ScheduledJob],
+    prev: &Cursors<Tz>,
+    now: &chrono::DateTime<Tz>,
+) -> (Vec<String>, Cursors<Tz>) {
+    let mut fires = Vec::new();
+    let mut next: Cursors<Tz> = std::collections::HashMap::with_capacity(jobs.len());
+
+    for job in jobs {
+        let fp = (job.enabled, job.schedule.clone());
+        let cursor = match prev.get(&job.id) {
+            // New job or changed fingerprint: reseed to now, do not fire.
+            None => JobCursor {
+                fingerprint: fp,
+                last_check: now.clone(),
+            },
+            Some(c) if c.fingerprint != fp => JobCursor {
+                fingerprint: fp,
+                last_check: now.clone(),
+            },
+            // Unchanged: evaluate the window.
+            Some(c) => {
+                let mut last_check = c.last_check.clone();
+                if job.enabled && next_due(&job.schedule, &c.last_check, now).is_some() {
+                    fires.push(job.id.clone());
+                    last_check = now.clone();
+                }
+                JobCursor {
+                    fingerprint: fp,
+                    last_check,
+                }
+            }
+        };
+        next.insert(job.id.clone(), cursor);
+    }
+
+    (fires, next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +303,62 @@ mod tests {
         assert_eq!(cfg.jobs, back.jobs);
     }
 
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    #[test]
+    fn next_due_fires_when_occurrence_in_window() {
+        // daily at 08:00; window (07:00, 08:30] contains 08:00.
+        let got = next_due(
+            "0 8 * * *",
+            &utc(2026, 7, 16, 7, 0),
+            &utc(2026, 7, 16, 8, 30),
+        );
+        assert_eq!(got, Some(utc(2026, 7, 16, 8, 0)));
+    }
+
+    #[test]
+    fn next_due_none_when_no_occurrence_in_window() {
+        // window (08:30, 09:00] has no daily-08:00 occurrence.
+        let got = next_due(
+            "0 8 * * *",
+            &utc(2026, 7, 16, 8, 30),
+            &utc(2026, 7, 16, 9, 0),
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn next_due_collapses_multiple_occurrences_to_one() {
+        // every 10 min; window (08:00, 08:35] has 08:10/08:20/08:30 -> only 08:10.
+        let got = next_due(
+            "*/10 * * * *",
+            &utc(2026, 7, 16, 8, 0),
+            &utc(2026, 7, 16, 8, 35),
+        );
+        assert_eq!(got, Some(utc(2026, 7, 16, 8, 10)));
+    }
+
+    #[test]
+    fn next_due_includes_occurrence_exactly_at_now() {
+        let got = next_due(
+            "0 8 * * *",
+            &utc(2026, 7, 16, 7, 59),
+            &utc(2026, 7, 16, 8, 0),
+        );
+        assert_eq!(got, Some(utc(2026, 7, 16, 8, 0)));
+    }
+
+    #[test]
+    fn next_due_invalid_cron_is_none() {
+        assert_eq!(
+            next_due("nonsense", &utc(2026, 7, 16, 7, 0), &utc(2026, 7, 16, 9, 0)),
+            None
+        );
+    }
+
     #[test]
     fn fingerprint_ignores_prompt_edits() {
         let a = job("a", "0 8 * * *");
@@ -219,5 +367,82 @@ mod tests {
         assert_eq!(a.schedule_fingerprint(), b.schedule_fingerprint());
         b.schedule = "0 9 * * *".to_string();
         assert_ne!(a.schedule_fingerprint(), b.schedule_fingerprint());
+    }
+
+    #[test]
+    fn plan_tick_seeds_new_job_without_firing() {
+        let jobs = vec![job("a", "0 8 * * *")];
+        let (fires, cursors) = plan_tick(&jobs, &Cursors::new(), &utc(2026, 7, 16, 9, 0));
+        assert!(
+            fires.is_empty(),
+            "a fresh job must not fire on its seed tick"
+        );
+        assert!(cursors.contains_key("a"));
+    }
+
+    #[test]
+    fn plan_tick_fires_once_when_due() {
+        let jobs = vec![job("a", "0 8 * * *")];
+        let (_, c0) = plan_tick(&jobs, &Cursors::new(), &utc(2026, 7, 16, 7, 0));
+        let (fires, c1) = plan_tick(&jobs, &c0, &utc(2026, 7, 16, 8, 30));
+        assert_eq!(fires, vec!["a".to_string()]);
+        // Next tick in the same day does not refire.
+        let (fires2, _) = plan_tick(&jobs, &c1, &utc(2026, 7, 16, 8, 31));
+        assert!(fires2.is_empty());
+    }
+
+    #[test]
+    fn plan_tick_skips_missed_occurrences_after_reseed() {
+        // Seed at 09:00 (after the 08:00 occurrence). It must never fire for the
+        // already-elapsed 08:00: this is the daemon-was-down case.
+        let jobs = vec![job("a", "0 8 * * *")];
+        let (_, c0) = plan_tick(&jobs, &Cursors::new(), &utc(2026, 7, 16, 9, 0));
+        let (fires, _) = plan_tick(&jobs, &c0, &utc(2026, 7, 16, 9, 30));
+        assert!(fires.is_empty());
+    }
+
+    #[test]
+    fn plan_tick_disabled_job_never_fires() {
+        let mut j = job("a", "0 8 * * *");
+        j.enabled = false;
+        let jobs = vec![j];
+        let (_, c0) = plan_tick(&jobs, &Cursors::new(), &utc(2026, 7, 16, 7, 0));
+        let (fires, _) = plan_tick(&jobs, &c0, &utc(2026, 7, 16, 8, 30));
+        assert!(fires.is_empty());
+    }
+
+    #[test]
+    fn plan_tick_reenable_does_not_catch_up() {
+        // Enabled then disabled then re-enabled around the occurrence: no catch-up.
+        let mut disabled = job("a", "0 8 * * *");
+        disabled.enabled = false;
+        let enabled = job("a", "0 8 * * *");
+        let (_, c0) = plan_tick(
+            std::slice::from_ref(&enabled),
+            &Cursors::new(),
+            &utc(2026, 7, 16, 7, 0),
+        );
+        // Disable before the occurrence (fingerprint change reseeds).
+        let (_, c1) = plan_tick(
+            std::slice::from_ref(&disabled),
+            &c0,
+            &utc(2026, 7, 16, 7, 30),
+        );
+        // Re-enable after the occurrence: fingerprint change reseeds to 08:30, no fire.
+        let (fires, _) = plan_tick(
+            std::slice::from_ref(&enabled),
+            &c1,
+            &utc(2026, 7, 16, 8, 30),
+        );
+        assert!(fires.is_empty());
+    }
+
+    #[test]
+    fn plan_tick_drops_removed_job_cursor() {
+        let jobs = vec![job("a", "0 8 * * *")];
+        let (_, c0) = plan_tick(&jobs, &Cursors::new(), &utc(2026, 7, 16, 7, 0));
+        assert!(c0.contains_key("a"));
+        let (_, c1) = plan_tick(&[], &c0, &utc(2026, 7, 16, 7, 30));
+        assert!(!c1.contains_key("a"), "removed job cursor must be dropped");
     }
 }
