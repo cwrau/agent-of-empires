@@ -244,6 +244,49 @@ pub async fn update_settings(
     // (`plugins.<id>.settings.*`) before the generic merge.
     rewrite_plugin_sections(&mut body);
 
+    // Scheduled jobs: stamp the owning profile onto any job that arrived without
+    // one (the web widget cannot know the serving profile) and validate the set
+    // server-side. The generic merge does not re-check cron, so without this a
+    // malformed job would persist and then silently never fire; reject it with a
+    // 400 instead.
+    if let Some(jobs_val) = body
+        .get_mut("scheduling")
+        .and_then(|s| s.get_mut("jobs"))
+        .filter(|v| v.is_array())
+    {
+        match serde_json::from_value::<Vec<crate::session::schedule::ScheduledJob>>(
+            jobs_val.clone(),
+        ) {
+            Ok(mut jobs) => {
+                for j in &mut jobs {
+                    if j.owner_profile.trim().is_empty() {
+                        j.owner_profile = state.profile.clone();
+                    }
+                }
+                let cfg = crate::session::schedule::SchedulingConfig { jobs };
+                if let Err(e) = cfg.validate() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid_scheduling", "message": e})),
+                    )
+                        .into_response();
+                }
+                if let Ok(v) = serde_json::to_value(&cfg.jobs) {
+                    *jobs_val = v;
+                }
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": "invalid_scheduling", "message": format!("{e}")}),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let result = tokio::task::spawn_blocking(move || {
         crate::session::update_config(|config| -> anyhow::Result<()> {
             let mut current = serde_json::to_value(&*config)?;
