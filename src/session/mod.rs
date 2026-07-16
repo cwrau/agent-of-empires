@@ -31,6 +31,7 @@ pub mod projects;
 pub(crate) mod recovery;
 pub mod repo_config;
 pub mod restart;
+pub mod schedule;
 pub mod scratch;
 pub(crate) mod serde_helpers;
 pub mod settings_schema;

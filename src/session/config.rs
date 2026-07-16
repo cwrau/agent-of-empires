@@ -68,6 +68,15 @@ pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
 
+    /// Cron-scheduled sessions (#2886). Profile/global only; never honored from
+    /// a repo's `.agent-of-empires/config.toml` (jobs run unattended host-side
+    /// work), so `scheduling` is omitted from `REPO_OVERRIDABLE_SECTIONS`.
+    #[serde(
+        default,
+        skip_serializing_if = "super::schedule::SchedulingConfig::is_empty"
+    )]
+    pub scheduling: super::schedule::SchedulingConfig,
+
     /// Trusted global/profile agent runtime overrides. Repo config does not
     /// merge this section, because hook installation writes durable agent files.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
