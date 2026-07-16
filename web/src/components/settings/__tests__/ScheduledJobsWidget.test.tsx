@@ -180,3 +180,207 @@ it("toggles a job's enabled flag and persists the whole array", () => {
   fireEvent.click(screen.getByLabelText("Enable Nightly"));
   expect(save).toHaveBeenCalledWith([{ ...job, enabled: false }]);
 });
+
+it("Every-N-minutes preset generates a step cron and reflects the input", () => {
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Frequency"), { target: { value: "minutes" } });
+  const everyN = screen.getByLabelText("Every N minutes") as HTMLInputElement;
+  fireEvent.change(everyN, { target: { value: "15" } });
+
+  expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("*/15 * * * *");
+});
+
+it("Hourly preset generates a minute-of-hour cron and reflects the input", () => {
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Frequency"), { target: { value: "hourly" } });
+  fireEvent.change(screen.getByLabelText("At minute"), { target: { value: "45" } });
+
+  expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("45 * * * *");
+});
+
+it("opens an existing every-N-minutes job on the minutes frequency", () => {
+  const job = {
+    id: "job-1",
+    owner_profile: "",
+    name: "Poll",
+    schedule: "*/10 * * * *",
+    enabled: true,
+    tool: "claude",
+    prompt: "poll",
+    group: "Scheduled",
+  };
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[job]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("Edit"));
+
+  expect((screen.getByLabelText("Frequency") as HTMLSelectElement).value).toBe("minutes");
+  expect((screen.getByLabelText("Every N minutes") as HTMLInputElement).value).toBe("10");
+});
+
+it("opens an existing hourly job on the hourly frequency", () => {
+  const job = {
+    id: "job-1",
+    owner_profile: "",
+    name: "Hourly",
+    schedule: "20 * * * *",
+    enabled: true,
+    tool: "claude",
+    prompt: "run",
+    group: "Scheduled",
+  };
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[job]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("Edit"));
+
+  expect((screen.getByLabelText("Frequency") as HTMLSelectElement).value).toBe("hourly");
+  expect((screen.getByLabelText("At minute") as HTMLInputElement).value).toBe("20");
+});
+
+it("falls back to custom for an unrecognized cron and leaves the raw field untouched", () => {
+  const job = {
+    id: "job-1",
+    owner_profile: "",
+    name: "Monthly",
+    schedule: "0 8 1 * *",
+    enabled: true,
+    tool: "claude",
+    prompt: "run",
+    group: "Scheduled",
+  };
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[job]} save={vi.fn()} />);
+  fireEvent.click(screen.getByText("Edit"));
+
+  expect((screen.getByLabelText("Frequency") as HTMLSelectElement).value).toBe("custom");
+  expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("0 8 1 * *");
+
+  // Re-selecting "custom" runs buildCron's custom arm, which returns null so the
+  // raw expression is deliberately left as-is.
+  fireEvent.change(screen.getByLabelText("Frequency"), { target: { value: "custom" } });
+  expect((screen.getByLabelText("Cron expression") as HTMLInputElement).value).toBe("0 8 1 * *");
+});
+
+it("requires name, prompt, and tool before saving", () => {
+  const save = vi.fn();
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.click(screen.getByText("Save job"));
+  expect(screen.getByText("Name is required.")).toBeTruthy();
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Job" } });
+  fireEvent.click(screen.getByText("Save job"));
+  expect(screen.getByText("Prompt is required.")).toBeTruthy();
+
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "do it" } });
+  fireEvent.change(screen.getByLabelText("Tool"), { target: { value: "" } });
+  fireEvent.click(screen.getByText("Save job"));
+  expect(screen.getByText("Tool is required.")).toBeTruthy();
+
+  expect(save).not.toHaveBeenCalled();
+});
+
+it("persists every optional field and the in-form enabled toggle", () => {
+  const save = vi.fn();
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Full job" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "work" } });
+  fireEvent.change(screen.getByLabelText("Tool"), { target: { value: "codex" } });
+  fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "codex-agent" } });
+  fireEvent.change(screen.getByLabelText("Model"), { target: { value: "gpt-5" } });
+  fireEvent.change(screen.getByLabelText("Approval mode"), { target: { value: "yolo" } });
+  fireEvent.change(screen.getByLabelText("Project"), { target: { value: "/repo" } });
+  fireEvent.change(screen.getByLabelText("Group"), { target: { value: "Nightly" } });
+  fireEvent.click(screen.getByLabelText("Enabled"));
+
+  fireEvent.click(screen.getByText("Save job"));
+
+  expect(save).toHaveBeenCalledWith([
+    {
+      id: "00000000-0000-0000-0000-000000000000",
+      owner_profile: "",
+      name: "Full job",
+      schedule: "0 8 * * *",
+      enabled: false,
+      tool: "codex",
+      agent: "codex-agent",
+      model: "gpt-5",
+      approval_mode: "yolo",
+      project: "/repo",
+      prompt: "work",
+      group: "Nightly",
+    },
+  ]);
+});
+
+it("omits blank optional fields and defaults the group when project is left empty", () => {
+  const save = vi.fn();
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={save} />);
+  fireEvent.click(screen.getByText("+ Add scheduled job"));
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Minimal" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "go" } });
+  fireEvent.change(screen.getByLabelText("Group"), { target: { value: "" } });
+
+  fireEvent.click(screen.getByText("Save job"));
+
+  const [[persisted]] = save.mock.calls;
+  const job = persisted[0];
+  expect(job.project).toBeUndefined();
+  expect(job.agent).toBeUndefined();
+  expect(job.group).toBe("Scheduled");
+});
+
+it("edits an existing job and persists the update in place", () => {
+  const save = vi.fn();
+  const job = {
+    id: "job-1",
+    owner_profile: "profile-a",
+    name: "Old name",
+    schedule: "0 8 * * *",
+    enabled: true,
+    tool: "claude",
+    prompt: "old prompt",
+    group: "Scheduled",
+  };
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[job]} save={save} />);
+
+  fireEvent.click(screen.getByText("Edit"));
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "new prompt" } });
+  fireEvent.click(screen.getByText("Save job"));
+
+  expect(save).toHaveBeenCalledWith([{ ...job, prompt: "new prompt" }]);
+});
+
+it("removes a job and persists the array without it", () => {
+  const save = vi.fn();
+  const jobs = [
+    {
+      id: "job-1",
+      owner_profile: "",
+      name: "First",
+      schedule: "0 8 * * *",
+      enabled: true,
+      tool: "claude",
+      prompt: "a",
+      group: "Scheduled",
+    },
+    {
+      id: "job-2",
+      owner_profile: "",
+      name: "Second",
+      schedule: "0 9 * * *",
+      enabled: true,
+      tool: "claude",
+      prompt: "b",
+      group: "Scheduled",
+    },
+  ];
+  render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={jobs} save={save} />);
+
+  fireEvent.click(screen.getByLabelText("Remove First"));
+  expect(save).toHaveBeenCalledWith([jobs[1]]);
+});

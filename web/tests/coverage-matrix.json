@@ -390,7 +390,10 @@
       "id": "settings.scheduled-jobs",
       "kind": "vitest",
       "risk": "medium",
-      "specs": ["src/components/settings/__tests__/ScheduledJobsWidget.test.tsx"],
+      "specs": [
+        "src/components/settings/__tests__/ScheduledJobsWidget.test.tsx",
+        "src/components/settings/__tests__/cronValidation.test.ts"
+      ],
       "components": [
         "web/src/components/settings/ScheduledJobsWidget.tsx",
         "web/src/components/settings/cronValidation.ts",
