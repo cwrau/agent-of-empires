@@ -56,23 +56,33 @@ pub async fn schedule_loop(state: Arc<AppState>) {
                 continue;
             }
         };
-        if let Err(e) = cfg.scheduling.validate() {
-            warn!(
-                target: "server.scheduler",
-                profile = %state.profile,
-                "skipping tick: invalid scheduling config: {e}"
-            );
-            continue;
-        }
-
-        // Only run jobs this daemon owns. An empty owner is a job added without
-        // a profile; run it. A job owned by another profile is left to that
+        // Only run jobs this daemon owns, that individually validate, and whose
+        // id is unique. A malformed job (e.g. a cron typo added via the settings
+        // UI, which does not re-validate cron server-side) is skipped and logged
+        // rather than halting every job. An empty owner is a job added without a
+        // profile; run it. A job owned by another profile is left to that
         // profile's daemon so multiple daemons do not double-fire.
+        let mut seen_ids = std::collections::HashSet::new();
         let owned: Vec<ScheduledJob> = cfg
             .scheduling
             .jobs
             .into_iter()
             .filter(|j| j.owner_profile.is_empty() || j.owner_profile == state.profile)
+            .filter(|j| match j.validate() {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(target: "server.scheduler", job = %j.id, "skipping invalid job: {e}");
+                    false
+                }
+            })
+            .filter(|j| {
+                if seen_ids.insert(j.id.clone()) {
+                    true
+                } else {
+                    warn!(target: "server.scheduler", job = %j.id, "skipping duplicate job id");
+                    false
+                }
+            })
             .collect();
 
         let now = chrono::Local::now();
