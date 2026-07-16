@@ -134,7 +134,6 @@ interface JobDraft {
   schedule: string;
   enabled: boolean;
   tool: string;
-  agent: string;
   model: string;
   approval_mode: string;
   project: string;
@@ -149,7 +148,6 @@ function emptyDraft(): JobDraft {
     schedule: "0 8 * * *",
     enabled: true,
     tool: "claude",
-    agent: "",
     model: "",
     approval_mode: "",
     project: "",
@@ -165,7 +163,6 @@ function draftFromJob(job: ScheduledJob): JobDraft {
     schedule: job.schedule,
     enabled: job.enabled,
     tool: job.tool || "claude",
-    agent: job.agent ?? "",
     model: job.model ?? "",
     approval_mode: job.approval_mode ?? "",
     project: job.project ?? "",
@@ -511,10 +508,9 @@ function JobForm({
   const [error, setError] = useState<string | null>(null);
   const set = (patch: Partial<JobDraft>) => setLocal((prev) => ({ ...prev, ...patch }));
 
-  // Models and approval modes are looked up against the agent the run resolves
-  // to: an explicit structured-view agent wins, else the tool (matches the
-  // scheduler's `job.agent ?? job.tool`).
-  const agentKey = (local.agent || local.tool).trim();
+  // Models and approval modes are looked up against the tool, which already
+  // selects the runtime (built-in binaries and custom ACP agents alike).
+  const agentKey = local.tool.trim();
   const entry = catalog[agentKey];
   const modelDesc = optionByCategory(entry, "model");
   const modeDesc = optionByCategory(entry, "mode");
@@ -574,13 +570,6 @@ function JobForm({
           value={local.tool}
           onChange={(v) => set({ tool: v })}
           options={agentOptions(agents, local.tool, "Select a tool…")}
-        />
-        <SelectRow
-          label="Agent (optional)"
-          ariaLabel="Agent"
-          value={local.agent}
-          onChange={(v) => set({ agent: v })}
-          options={agentOptions(agents, local.agent, "Same as tool")}
         />
         <CapabilityRow
           label="Model (optional)"
@@ -732,7 +721,6 @@ export function ScheduledJobsWidget({ descriptor, value, save }: CustomWidgetPro
       schedule: draft.schedule.trim(),
       enabled: draft.enabled,
       tool: draft.tool.trim(),
-      agent: draft.agent.trim() || undefined,
       model: draft.model.trim() || undefined,
       approval_mode: draft.approval_mode.trim() || undefined,
       project: draft.project.trim() || undefined,

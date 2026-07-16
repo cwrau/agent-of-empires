@@ -5,10 +5,11 @@
 // full array with a generated id and the built cron, and an invalid raw cron
 // blocks the save with an inline error.
 //
-// The tool / agent / model / approval-mode / project fields are capability-driven
-// pickers (#2887): tool and agent come from the wizard's agent list
-// (GET /api/agents), model and approval mode from the recall catalog each agent
-// advertised (GET /api/acp/option-catalog), the project from the registry
+// The tool / model / approval-mode / project fields are capability-driven
+// pickers (#2887): the tool comes from the wizard's agent list
+// (GET /api/agents) and already selects the runtime (built-in binaries and
+// custom ACP agents alike), model and approval mode from the recall catalog the
+// tool advertised (GET /api/acp/option-catalog), the project from the registry
 // (GET /api/projects) plus the shared directory browser, and the group from a
 // datalist of existing groups (GET /api/groups) that still accepts a new name.
 // All four sources are mocked here the way the sibling AcpDefaultsWidget test
@@ -367,7 +368,7 @@ it("requires name, prompt, and tool before saving", () => {
   expect(save).not.toHaveBeenCalled();
 });
 
-it("selecting an agent swaps its capability fields to catalog-driven dropdowns", async () => {
+it("selecting a tool swaps its capability fields to catalog-driven dropdowns", async () => {
   render(<ScheduledJobsWidget descriptor={DESCRIPTOR} value={[]} save={vi.fn()} />);
   fireEvent.click(screen.getByText("+ Add scheduled job"));
 
@@ -444,7 +445,6 @@ it("omits blank optional fields and defaults the group when project is left as s
   const [[persisted]] = save.mock.calls;
   const job = persisted[0];
   expect(job.project).toBeUndefined();
-  expect(job.agent).toBeUndefined();
   expect(job.model).toBeUndefined();
   expect(job.approval_mode).toBeUndefined();
   expect(job.group).toBe("Scheduled");
