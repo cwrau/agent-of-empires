@@ -244,11 +244,14 @@ pub async fn update_settings(
     // (`plugins.<id>.settings.*`) before the generic merge.
     rewrite_plugin_sections(&mut body);
 
-    // Scheduled jobs: stamp the owning profile onto any job that arrived without
-    // one (the web widget cannot know the serving profile) and validate the set
-    // server-side. The generic merge does not re-check cron, so without this a
-    // malformed job would persist and then silently never fire; reject it with a
-    // 400 instead.
+    // Scheduled jobs (#2886). Jobs live in one global list keyed by owning
+    // profile, but this PATCH is served by a single profile's daemon, so it may
+    // only manage its own jobs. Rebuild the list as every other profile's jobs
+    // preserved exactly as stored, plus the incoming jobs this profile owns (an
+    // empty owner is stamped to the serving profile; a job claiming a different
+    // owner is dropped, so a client on profile A cannot write or spoof profile
+    // B's jobs). Then validate the full set server-side, since the generic merge
+    // does not re-check cron and a malformed job would persist yet never fire.
     if let Some(jobs_val) = body
         .get_mut("scheduling")
         .and_then(|s| s.get_mut("jobs"))
@@ -257,12 +260,27 @@ pub async fn update_settings(
         match serde_json::from_value::<Vec<crate::session::schedule::ScheduledJob>>(
             jobs_val.clone(),
         ) {
-            Ok(mut jobs) => {
-                for j in &mut jobs {
-                    if j.owner_profile.trim().is_empty() {
-                        j.owner_profile = state.profile.clone();
-                    }
-                }
+            Ok(incoming) => {
+                let profile = state.profile.clone();
+                let mut own: Vec<crate::session::schedule::ScheduledJob> = incoming
+                    .into_iter()
+                    .filter_map(|mut j| {
+                        if j.owner_profile.trim().is_empty() {
+                            j.owner_profile = profile.clone();
+                        }
+                        (j.owner_profile == profile).then_some(j)
+                    })
+                    .collect();
+                let mut jobs: Vec<crate::session::schedule::ScheduledJob> =
+                    crate::session::Config::load()
+                        .map(|c| c.scheduling.jobs)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|j| {
+                            !j.owner_profile.trim().is_empty() && j.owner_profile != profile
+                        })
+                        .collect();
+                jobs.append(&mut own);
                 let cfg = crate::session::schedule::SchedulingConfig { jobs };
                 if let Err(e) = cfg.validate() {
                     return (
