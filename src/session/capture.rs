@@ -35,8 +35,14 @@ fn resolve_agent_home(env_var: Option<&str>, default_subdir: &str) -> Result<Pat
         .join(default_subdir))
 }
 
+/// Resolve a path to a comparable identity: canonicalize when the directory
+/// exists, otherwise fall back to lexical `.`/`..` normalization so a
+/// historical unnormalized spelling (a pre-#2858 worktree `project_path` like
+/// `/repos/x/../x-worktrees/b`) still compares equal to the plain spelling
+/// after the directory has been deleted.
 fn canonicalize_or_raw(path: &str) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| crate::git::template::lexical_normalize(Path::new(path)))
 }
 
 /// Validate a captured session ID, logging a warning if it fails.
@@ -808,6 +814,12 @@ pub(crate) fn compose_exclusion_with_stopped_peers(
     let Ok(instances) = storage.load() else {
         return set;
     };
+    // Compare canonicalized paths, not raw strings: worktree sessions created
+    // from `../`-style templates historically stored an unnormalized
+    // `project_path` (e.g. `/repos/x/../x-worktrees/b`), and a raw comparison
+    // silently drops them from this exclusion even though they share the
+    // directory — re-opening the #2355 steal for exactly those peers (#2858).
+    let canonical_current = canonicalize_or_raw(current_project_path);
     for inst in instances {
         if inst.id == current_instance_id {
             continue;
@@ -815,7 +827,7 @@ pub(crate) fn compose_exclusion_with_stopped_peers(
         if inst.tool != "claude" {
             continue;
         }
-        if inst.project_path != current_project_path {
+        if canonicalize_or_raw(&inst.project_path) != canonical_current {
             continue;
         }
         let should_exclude = matches!(inst.status, crate::session::Status::Stopped)
@@ -2280,6 +2292,29 @@ mod tests {
     use super::*;
     use crate::session::test_support::EnvGuard;
     use serial_test::serial;
+
+    #[test]
+    fn canonicalize_or_raw_normalizes_deleted_dirs_lexically() {
+        // A stopped worktree session's directory is often deleted while its
+        // unnormalized pre-#2858 `project_path` spelling lives on in
+        // `sessions.json`. With no filesystem entry to canonicalize, the two
+        // spellings must still compare equal via the lexical fallback.
+        assert_eq!(
+            canonicalize_or_raw("/nonexistent-aoe-test/decoy/../wt"),
+            canonicalize_or_raw("/nonexistent-aoe-test/wt"),
+        );
+        // An existing directory keeps full canonicalization (symlink-aware).
+        let temp = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(temp.path()).unwrap();
+        let spelled = temp
+            .path()
+            .join("x")
+            .join("..")
+            .to_string_lossy()
+            .to_string();
+        std::fs::create_dir_all(temp.path().join("x")).unwrap();
+        assert_eq!(canonicalize_or_raw(&spelled), real);
+    }
 
     #[test]
     fn test_generate_claude_session_id() {
