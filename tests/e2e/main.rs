@@ -23,6 +23,7 @@ mod acp_session_log_tee_e2e;
 mod acp_tool_cards_e2e;
 mod archive_restore;
 mod archive_structured;
+mod claude_shared_project_correlation_e2e;
 mod cli;
 mod command_palette;
 mod errors;
