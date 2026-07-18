@@ -458,6 +458,19 @@ const RESUME_IDLE_GRACE_DEFAULT: std::time::Duration = std::time::Duration::from
 /// `OFF_PROTOCOL_WORK_GRACE_FLOOR` below before recovering.
 pub(crate) const CANCEL_ESCALATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Shortened escalation grace applied when the user cancelled a turn but
+/// the agent keeps producing new progress (text chunks or a fresh tool
+/// call) afterwards, i.e. it is ignoring `session/cancel` the way opencode
+/// 1.15.13 did (#1908). The deadline is anchored to the user's Stop click
+/// (`cancel_at + POST_CANCEL_PROGRESS_GRACE`) and clamped to never extend
+/// the standing 10s grace, so a cooperative agent that emits one in-flight
+/// chunk queued before it saw the cancel still gets a brief window to
+/// resolve the prompt as `Cancelled` (no worker restart), while an agent
+/// that keeps streaming past the window is force-restarted in ~2s instead
+/// of 10s.
+pub(crate) const POST_CANCEL_PROGRESS_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
 /// Vendor-agnostic silent-orphan grace fallback used when no config
 /// value is available. Mirrors `AcpConfig::silent_orphan_grace_secs`
 /// default. Bumped from 60s to 120s in #1360 so async-agent flows
@@ -693,6 +706,49 @@ pub(crate) enum LifecycleSignal {
     /// Clears the compaction suppression so any continued work in the same
     /// turn recovers on the normal grace. See #2898.
     CompactionCompleted,
+}
+
+impl LifecycleSignal {
+    /// True for signals that mean the agent is actively generating *new*
+    /// work: a text/thought/plan chunk (`Progress`) or a freshly started
+    /// tool call (`ToolStarted`). Used to detect an agent that keeps
+    /// working after the user's `session/cancel`, i.e. one that ignores the
+    /// ACP cancel notification (#1908). Accounting (`TerminalUsage`), tool
+    /// completion, and compaction markers are winding-down or ambient, not
+    /// new work, so they must not count.
+    fn is_post_cancel_progress(&self) -> bool {
+        matches!(
+            self,
+            LifecycleSignal::Progress | LifecycleSignal::ToolStarted { .. }
+        )
+    }
+}
+
+/// Decide the shortened cancel-escalation deadline when the user has
+/// cancelled a turn and the agent is still producing progress after the
+/// `session/cancel` (#1908). Pure so the deadline math is unit-testable
+/// without the connection loop.
+///
+/// Returns `Some(deadline)` when fast escalation should be armed for the
+/// first time: `user_cancel_at` is set, `already_armed` is false, and `sig`
+/// is post-cancel progress. The deadline is anchored to the user's Stop
+/// click (`user_cancel_at + POST_CANCEL_PROGRESS_GRACE`) and clamped with
+/// `min(current_deadline, ...)` so it can only shorten the standing grace,
+/// never extend it (a late first signal, or a user Stop that lands well
+/// after a silent-orphan cancel already armed the 10s grace, must not push
+/// escalation further out). Returns `None` when nothing should change.
+fn post_cancel_fast_deadline(
+    user_cancel_at: Option<tokio::time::Instant>,
+    already_armed: bool,
+    sig: &LifecycleSignal,
+    current_deadline: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    if already_armed || !sig.is_post_cancel_progress() {
+        return None;
+    }
+    let cancel_at = user_cancel_at?;
+    let fast = cancel_at + POST_CANCEL_PROGRESS_GRACE;
+    Some(fast.min(current_deadline))
 }
 
 /// Classify a `SessionUpdate` into a `LifecycleSignal`, or `None` for
@@ -6418,6 +6474,20 @@ async fn run_connection_task<W, R>(
                         // process group + respawns, instead of waiting out
                         // the 10s grace. See #1727.
                         let mut force_stopped = false;
+                        // #1908: the monotonic instant of the user's first
+                        // Stop click this turn (its presence also means "a
+                        // user cancel is pending"). Recorded unconditionally,
+                        // even when the silent-orphan path already set
+                        // `cancelling`, so a user Stop during an orphan cancel
+                        // still arms fast escalation rather than being swallowed
+                        // by the `if !cancelling` guard below. Distinct from
+                        // `cancelling`, which the silent-orphan path also sets.
+                        let mut user_cancel_at: Option<tokio::time::Instant> = None;
+                        // #1908: once-guard so continued post-cancel progress
+                        // shortens the escalation deadline exactly once; it must
+                        // never re-extend, or a continuously-streaming agent
+                        // would push escalation forever.
+                        let mut cancel_progress_escalation_armed = false;
                         let cancel_grace = tokio::time::sleep(CANCEL_ESCALATION_GRACE);
                         tokio::pin!(cancel_grace);
 
@@ -6490,6 +6560,33 @@ async fn run_connection_task<W, R>(
                                                 "discarding stale lifecycle envelope across prompt boundary"
                                             );
                                         } else {
+                                            // #1908: the user cancelled but the
+                                            // agent is still emitting new work
+                                            // (text chunk or fresh tool call), so
+                                            // it is ignoring session/cancel.
+                                            // Shorten the escalation deadline once
+                                            // to the user's Stop click + 2s (never
+                                            // extending), so the turn is
+                                            // force-restarted in ~2s instead of
+                                            // waiting the full 10s watchdog. A
+                                            // cooperative agent's single in-flight
+                                            // chunk still leaves the window for its
+                                            // clean Cancelled to land first.
+                                            if let Some(deadline) = post_cancel_fast_deadline(
+                                                user_cancel_at,
+                                                cancel_progress_escalation_armed,
+                                                &env.signal,
+                                                cancel_grace.deadline(),
+                                            ) {
+                                                cancel_progress_escalation_armed = true;
+                                                warn!(
+                                                    target: "acp.protocol",
+                                                    session = %session_label,
+                                                    grace_secs = POST_CANCEL_PROGRESS_GRACE.as_secs(),
+                                                    "agent still producing progress after session/cancel; shortening escalation to force-restart the worker"
+                                                );
+                                                cancel_grace.as_mut().reset(deadline);
+                                            }
                                             watchdog.apply_signal(
                                                 env.signal,
                                                 tokio::time::Instant::now(),
@@ -6608,6 +6705,15 @@ async fn run_connection_task<W, R>(
                                             connection.send_notification(
                                                 CancelNotification::new(acp_session_id.clone()),
                                             )?;
+                                            // #1908: record the first user Stop
+                                            // click unconditionally (even if the
+                                            // silent-orphan path already set
+                                            // `cancelling`) so post-cancel
+                                            // progress can arm fast escalation.
+                                            if user_cancel_at.is_none() {
+                                                user_cancel_at =
+                                                    Some(tokio::time::Instant::now());
+                                            }
                                             // Arm the escalation watchdog on
                                             // the first cancel only; later
                                             // cancels just resend the
@@ -7768,6 +7874,121 @@ async fn handle_elicitation_request(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    // #1908: an agent that ignores session/cancel keeps streaming; the
+    // prompt loop must fast-escalate on continued post-cancel progress.
+
+    fn tool_started_sig() -> LifecycleSignal {
+        LifecycleSignal::ToolStarted {
+            id: "tc-1".to_string(),
+            is_background_task: false,
+        }
+    }
+
+    #[test]
+    fn is_post_cancel_progress_only_flags_new_work() {
+        // New agent work: counts.
+        assert!(LifecycleSignal::Progress.is_post_cancel_progress());
+        assert!(tool_started_sig().is_post_cancel_progress());
+        // Accounting / wind-down / ambient: does not count.
+        assert!(!LifecycleSignal::TerminalUsage.is_post_cancel_progress());
+        assert!(!LifecycleSignal::CompactionStarted.is_post_cancel_progress());
+        assert!(!LifecycleSignal::CompactionCompleted.is_post_cancel_progress());
+        assert!(!LifecycleSignal::ToolCompleted {
+            id: "tc-1".to_string(),
+            succeeded: true,
+            off_protocol_work: None,
+        }
+        .is_post_cancel_progress());
+    }
+
+    #[test]
+    fn post_cancel_fast_deadline_arms_on_progress_after_user_cancel() {
+        let cancel_at = tokio::time::Instant::now();
+        let current = cancel_at + CANCEL_ESCALATION_GRACE;
+        let d =
+            post_cancel_fast_deadline(Some(cancel_at), false, &LifecycleSignal::Progress, current)
+                .expect("should arm");
+        assert_eq!(d, cancel_at + POST_CANCEL_PROGRESS_GRACE);
+        // A fresh tool call arms it too.
+        assert!(
+            post_cancel_fast_deadline(Some(cancel_at), false, &tool_started_sig(), current)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn post_cancel_fast_deadline_ignores_when_no_user_cancel() {
+        let now = tokio::time::Instant::now();
+        assert!(post_cancel_fast_deadline(
+            None,
+            false,
+            &LifecycleSignal::Progress,
+            now + CANCEL_ESCALATION_GRACE
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn post_cancel_fast_deadline_short_circuits_when_already_armed() {
+        let cancel_at = tokio::time::Instant::now();
+        assert!(post_cancel_fast_deadline(
+            Some(cancel_at),
+            true,
+            &LifecycleSignal::Progress,
+            cancel_at + CANCEL_ESCALATION_GRACE,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn post_cancel_fast_deadline_ignores_non_progress_signals() {
+        let cancel_at = tokio::time::Instant::now();
+        let current = cancel_at + CANCEL_ESCALATION_GRACE;
+        for sig in [
+            LifecycleSignal::TerminalUsage,
+            LifecycleSignal::CompactionStarted,
+            LifecycleSignal::ToolCompleted {
+                id: "tc-1".to_string(),
+                succeeded: false,
+                off_protocol_work: None,
+            },
+        ] {
+            assert!(post_cancel_fast_deadline(Some(cancel_at), false, &sig, current).is_none());
+        }
+    }
+
+    #[test]
+    fn post_cancel_fast_deadline_never_extends_the_standing_grace() {
+        // A user Stop that lands well after a silent-orphan cancel already
+        // armed the 10s grace must not push escalation further out: the
+        // returned deadline is clamped to the (earlier) current deadline.
+        let orphan_deadline = tokio::time::Instant::now() + POST_CANCEL_PROGRESS_GRACE;
+        let cancel_at = orphan_deadline; // user clicked "now", 2s window would land past orphan
+        let d = post_cancel_fast_deadline(
+            Some(cancel_at),
+            false,
+            &LifecycleSignal::Progress,
+            orphan_deadline,
+        )
+        .expect("should arm");
+        assert_eq!(d, orphan_deadline);
+        assert!(d <= cancel_at + POST_CANCEL_PROGRESS_GRACE);
+    }
+
+    #[test]
+    fn post_cancel_fast_deadline_late_signal_yields_past_deadline() {
+        // First qualifying signal arrives after the 2s window: the returned
+        // deadline is already in the past, so the timer fires immediately.
+        let cancel_at = tokio::time::Instant::now();
+        let current = cancel_at + CANCEL_ESCALATION_GRACE;
+        let fast =
+            post_cancel_fast_deadline(Some(cancel_at), false, &LifecycleSignal::Progress, current)
+                .unwrap();
+        // Deadline is anchored to the click + 2s, independent of when the
+        // signal was observed, so a signal seen at +5s still escalates at +2s.
+        assert_eq!(fast, cancel_at + POST_CANCEL_PROGRESS_GRACE);
+    }
 
     #[tokio::test]
     async fn between_prompt_signals_do_not_block_on_a_full_lifecycle_channel() {
