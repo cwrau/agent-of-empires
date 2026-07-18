@@ -454,21 +454,45 @@ pub enum SessionBucket {
 }
 
 /// Which irreversible operation currently owns a session's `op_claim`. The
-/// purge (permanent teardown) and restore (worktree move-back) paths run their
-/// slow work on an unlocked snapshot; the claim is the durable, cross-process
-/// primitive that serializes the two so neither tears down (or moves) state the
-/// other is authoritative over. See #2541.
+/// purge (permanent teardown), restore (worktree move-back), and trash
+/// (container stop + worktree relocation into the holding area) paths run
+/// their slow work on an unlocked snapshot; the claim is the durable,
+/// cross-process primitive that serializes them so none tears down (or moves)
+/// state another is authoritative over. See #2541.
+///
+/// `Trash` is deliberately the weakest claim: it marks "teardown in flight"
+/// so peers can observe it, but it never blocks user intent. A purge or
+/// restore seizes a fresh `Trash` claim (see [`Instance::try_claim`]) and the
+/// teardown yields via its pre-move re-check and the locked relocation
+/// commit, so a `d` followed by an immediate restore stays instant.
+///
+/// Compat: `ClaimOp` has no `#[serde(other)]` fallback, so an aoe binary
+/// that predates the `Trash` variant fails to deserialize the whole
+/// `Instance` row carrying `op:"trash"`; `Storage::load` then skips the row
+/// and quarantines it to `sessions.corrupt.jsonl`, making the session
+/// temporarily invisible to that binary for the life of the claim. The TTL
+/// ([`Instance::OP_CLAIM_TTL`], 10 minutes) bounds how long the claim stays
+/// FRESH, but the field itself only clears when a newer binary next rewrites
+/// that row (a release path or the load-time expired-claim sweep), so the
+/// invisibility ends at that rewrite, not on a timer. If the older binary
+/// *writes* storage
+/// while the row is invisible, its save drops the row from `sessions.json`
+/// entirely (it survives only in the quarantine sidecar). Same exposure
+/// class as the #2541 Purge/Restore variants against pre-#2541 binaries: a
+/// mixed-version fleet touching storage inside a claim's TTL window.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ClaimOp {
     Purge,
     Restore,
+    Trash,
 }
 
-/// A durable ownership marker for an in-flight purge or restore. `at` serves
-/// double duty: ownership plus the base for the TTL self-heal (a claim older
-/// than the TTL is treated as absent, so a crash mid-operation cannot strand a
-/// row permanently). Written on disk under the storage flock via
+/// A durable ownership marker for an in-flight purge, restore, or trash
+/// teardown. `at` serves double duty: ownership plus the base for the TTL
+/// self-heal (a claim older than the TTL is treated as absent, so a crash
+/// mid-operation cannot strand a row permanently). Written on disk under the
+/// storage flock via
 /// [`Instance::try_claim`], the only serialization point visible across the
 /// CLI, the serve daemon, and the TUI. See #2541.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -618,12 +642,15 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_trash_project_path: Option<String>,
 
-    /// Durable ownership of an in-flight purge or restore, acquired under the
-    /// storage flock via [`Self::try_claim`] before either path runs its slow
-    /// unlocked phase (purge teardown, restore worktree move). It closes the
-    /// cross-process purge/restore race (#2541): a purge refuses to tear down a
-    /// row a fresh restore claim holds, and a restore refuses to move a row a
-    /// fresh purge claim holds. Deliberately NOT copied by
+    /// Durable ownership of an in-flight purge, restore, or trash teardown,
+    /// acquired under the storage flock via [`Self::try_claim`] before each
+    /// path runs its slow unlocked phase (purge teardown, restore worktree
+    /// move, trash container stop + relocation). It closes the cross-process
+    /// purge/restore race (#2541): a purge refuses to tear down a row a fresh
+    /// restore claim holds, and a restore refuses to move a row a fresh purge
+    /// claim holds. A `Trash` claim is weaker: it marks the teardown as
+    /// observable in-flight state and is seized by either of the other two
+    /// (see [`ClaimOp`]). Deliberately NOT copied by
     /// [`Self::merge_user_action_diff`]: keeping it out of the peer-diff set is
     /// exactly what stops a concurrent user action from clobbering a live claim.
     /// Additive: absent in older `sessions.json` rows, so no migration is
@@ -1636,9 +1663,12 @@ impl Instance {
             self.status = post.status;
         }
         // `op_claim` is intentionally NOT spliced here. It is a cross-process
-        // ownership marker for an in-flight purge/restore, not a user-action
-        // field; excluding it from the peer diff is what stops a concurrent
-        // user action from clobbering a live claim on disk. See #2541.
+        // ownership marker for an in-flight purge, restore, or trash
+        // teardown, not a user-action field; excluding it from the peer diff
+        // is what stops a concurrent user action from clobbering a live claim
+        // on disk. The trash path relies on this same drop: its claim is
+        // written by a same-flock post-mutation hook instead
+        // (`apply_user_action_with`). See #2541.
         self.last_accessed_at = self.last_accessed_at.max(post.last_accessed_at);
 
         let archived_changed = pre.archived_at != post.archived_at;
@@ -1748,14 +1778,23 @@ impl Instance {
     pub const OP_CLAIM_TTL: chrono::Duration = chrono::Duration::minutes(10);
 
     /// Atomically acquire or keep the op claim for `want`. Returns `Ok` when
-    /// the claim is free, already ours, or expired (self-heal), and
-    /// `Err(holder)` when the other operation holds a still-fresh claim.
+    /// the claim is free, already ours, expired (self-heal), or held by a
+    /// fresh `Trash` claim being seized by a purge or restore; returns
+    /// `Err(holder)` when another operation holds a still-fresh claim that
+    /// `want` may not seize.
+    ///
+    /// Seizure order: `Trash` is the weakest claim. A teardown marks state,
+    /// it does not gate user intent, so `Purge` and `Restore` take over a
+    /// fresh `Trash` claim and the teardown yields via its pre-move re-check
+    /// and the locked relocation commit. `Trash` itself never seizes a fresh
+    /// `Purge` or `Restore` claim, and `Purge`/`Restore` still exclude each
+    /// other as before.
     ///
     /// Must be called inside a `Storage::update` closure so the check-and-set
     /// runs under the storage flock, the only cross-process serialization
     /// point. The whole destructive/irreversible phase (purge teardown, restore
-    /// worktree move) must win this before running unlocked, and clear the
-    /// claim when it finishes. See #2541.
+    /// worktree move, trash relocation) must win this before running unlocked,
+    /// and clear the claim when it finishes. See #2541.
     pub fn try_claim(
         &mut self,
         want: ClaimOp,
@@ -1763,12 +1802,26 @@ impl Instance {
         now: DateTime<Utc>,
     ) -> Result<(), ClaimOp> {
         match &self.op_claim {
-            Some(c) if c.op != want && (now - c.at) < ttl => Err(c.op),
+            Some(c) if c.op != want && c.op != ClaimOp::Trash && (now - c.at) < ttl => Err(c.op),
             _ => {
                 self.op_claim = Some(OpClaim { op: want, at: now });
                 Ok(())
             }
         }
+    }
+
+    /// True when a fresh (unexpired) Purge or Restore claim holds this row,
+    /// i.e. a peer seized the trash teardown's claim (or claimed the row
+    /// outright while the teardown ran unclaimed). The teardown's two
+    /// decision points share this predicate: the pre-move gate
+    /// (`teardown_may_relocate`) and the locked relocation commit
+    /// (`commit_trash_relocation`). `try_claim` keeps its own inline
+    /// predicate because it additionally excludes the op being acquired.
+    pub fn is_seized_by_fresh_peer_claim(&self, now: DateTime<Utc>) -> bool {
+        matches!(
+            &self.op_claim,
+            Some(c) if c.op != ClaimOp::Trash && (now - c.at) < Self::OP_CLAIM_TTL
+        )
     }
 
     /// Drop the op claim only when it is owned by `op`. Ownership-guarding the
@@ -6295,6 +6348,57 @@ mod tests {
         assert_eq!(
             inst.try_claim(ClaimOp::Purge, Instance::OP_CLAIM_TTL, now),
             Err(ClaimOp::Restore),
+        );
+    }
+
+    // Trash is the weakest claim: a fresh Trash claim is seized by both
+    // Purge and Restore (teardown state never blocks user intent), while
+    // Trash itself is refused by a fresh Purge or Restore claim.
+    #[test]
+    fn trash_claim_seizure_matrix() {
+        let now = Utc::now();
+        for seizer in [ClaimOp::Purge, ClaimOp::Restore] {
+            let mut inst = Instance::new("s", "/tmp/x");
+            inst.try_claim(ClaimOp::Trash, Instance::OP_CLAIM_TTL, now)
+                .expect("trash wins the free row");
+            inst.try_claim(seizer, Instance::OP_CLAIM_TTL, now)
+                .unwrap_or_else(|holder| {
+                    panic!("{seizer:?} must seize a fresh Trash claim, refused by {holder:?}")
+                });
+            assert_eq!(inst.op_claim.as_ref().map(|c| c.op), Some(seizer));
+        }
+        for holder in [ClaimOp::Purge, ClaimOp::Restore] {
+            let mut inst = Instance::new("s", "/tmp/x");
+            inst.try_claim(holder, Instance::OP_CLAIM_TTL, now)
+                .expect("holder wins the free row");
+            assert_eq!(
+                inst.try_claim(ClaimOp::Trash, Instance::OP_CLAIM_TTL, now),
+                Err(holder),
+                "a fresh {holder:?} claim must refuse a Trash claim"
+            );
+        }
+    }
+
+    // The Trash variant round-trips on the wire as "trash". Compat (see the
+    // ClaimOp doc): a binary predating the variant fails the whole-row
+    // deserialize, so Storage::load quarantines the row and the session is
+    // temporarily invisible to that binary until a newer binary next
+    // rewrites the row without the claim.
+    #[test]
+    fn trash_claim_serde_roundtrip() {
+        let mut inst = Instance::new("s", "/tmp/x");
+        let now = Utc::now();
+        inst.try_claim(ClaimOp::Trash, Instance::OP_CLAIM_TTL, now)
+            .expect("free row grants the claim");
+        let json = serde_json::to_string(&inst).expect("serialize");
+        assert!(json.contains("\"trash\""), "lowercase wire form");
+        let back: Instance = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(
+            back.op_claim,
+            Some(OpClaim {
+                op: ClaimOp::Trash,
+                at: now
+            })
         );
     }
 
