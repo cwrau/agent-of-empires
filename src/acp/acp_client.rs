@@ -730,23 +730,33 @@ impl LifecycleSignal {
 /// without the connection loop.
 ///
 /// Returns `Some(deadline)` when fast escalation should be armed for the
-/// first time: `user_cancel_at` is set, `already_armed` is false, and `sig`
-/// is post-cancel progress. The deadline is anchored to the user's Stop
-/// click (`user_cancel_at + POST_CANCEL_PROGRESS_GRACE`) and clamped with
-/// `min(current_deadline, ...)` so it can only shorten the standing grace,
-/// never extend it (a late first signal, or a user Stop that lands well
-/// after a silent-orphan cancel already armed the 10s grace, must not push
-/// escalation further out). Returns `None` when nothing should change.
+/// first time: `user_cancel_at` is set, `already_armed` is false, `sig` is
+/// post-cancel progress, and the signal was observed at or after the Stop
+/// click (`signal_observed_at >= user_cancel_at`). The `observed_at` gate
+/// rejects an envelope that was already queued in the lifecycle channel
+/// before `ClientCmd::Cancel` won the select loop: such a signal reflects
+/// pre-cancel activity, so accelerating on it could force-restart a
+/// cooperative agent after 2s despite no post-cancel progress. The deadline
+/// is anchored to the user's Stop click (`user_cancel_at +
+/// POST_CANCEL_PROGRESS_GRACE`) and clamped with `min(current_deadline, ...)`
+/// so it can only shorten the standing grace, never extend it (a late first
+/// signal, or a user Stop that lands well after a silent-orphan cancel
+/// already armed the 10s grace, must not push escalation further out).
+/// Returns `None` when nothing should change.
 fn post_cancel_fast_deadline(
     user_cancel_at: Option<tokio::time::Instant>,
     already_armed: bool,
     sig: &LifecycleSignal,
+    signal_observed_at: tokio::time::Instant,
     current_deadline: tokio::time::Instant,
 ) -> Option<tokio::time::Instant> {
     if already_armed || !sig.is_post_cancel_progress() {
         return None;
     }
     let cancel_at = user_cancel_at?;
+    if signal_observed_at < cancel_at {
+        return None;
+    }
     let fast = cancel_at + POST_CANCEL_PROGRESS_GRACE;
     Some(fast.min(current_deadline))
 }
@@ -1381,6 +1391,13 @@ fn between_prompt_stop_reason(adopted: bool, cost_seen: bool) -> &'static str {
 pub(crate) struct LifecycleEnvelope {
     pub epoch: u64,
     pub signal: LifecycleSignal,
+    /// Monotonic instant the notification handler observed this signal
+    /// (before it entered the channel). The prompt loop uses it to tell a
+    /// signal genuinely produced after the user's Stop click from one that
+    /// was already queued before it: only the former may accelerate cancel
+    /// escalation (#1908). Stamping at observation, not at dequeue, is what
+    /// makes the comparison meaningful under channel backpressure.
+    pub observed_at: tokio::time::Instant,
 }
 
 /// Deliver a lifecycle envelope from the notification handler to the
@@ -1454,8 +1471,18 @@ async fn forward_lifecycle_signals(
     if !prompt_active {
         return;
     }
+    let observed_at = tokio::time::Instant::now();
     for signal in [lifecycle, wakeup].into_iter().flatten() {
-        send_lifecycle_signal(tx, LifecycleEnvelope { epoch, signal }, session_label).await;
+        send_lifecycle_signal(
+            tx,
+            LifecycleEnvelope {
+                epoch,
+                signal,
+                observed_at,
+            },
+            session_label,
+        )
+        .await;
     }
 }
 
@@ -6576,6 +6603,7 @@ async fn run_connection_task<W, R>(
                                                 user_cancel_at,
                                                 cancel_progress_escalation_armed,
                                                 &env.signal,
+                                                env.observed_at,
                                                 cancel_grace.deadline(),
                                             ) {
                                                 cancel_progress_escalation_armed = true;
@@ -7906,15 +7934,26 @@ mod tests {
     fn post_cancel_fast_deadline_arms_on_progress_after_user_cancel() {
         let cancel_at = tokio::time::Instant::now();
         let current = cancel_at + CANCEL_ESCALATION_GRACE;
-        let d =
-            post_cancel_fast_deadline(Some(cancel_at), false, &LifecycleSignal::Progress, current)
-                .expect("should arm");
+        // Signal observed at the click (>= cancel_at), so it is genuine
+        // post-cancel progress.
+        let d = post_cancel_fast_deadline(
+            Some(cancel_at),
+            false,
+            &LifecycleSignal::Progress,
+            cancel_at,
+            current,
+        )
+        .expect("should arm");
         assert_eq!(d, cancel_at + POST_CANCEL_PROGRESS_GRACE);
         // A fresh tool call arms it too.
-        assert!(
-            post_cancel_fast_deadline(Some(cancel_at), false, &tool_started_sig(), current)
-                .is_some()
-        );
+        assert!(post_cancel_fast_deadline(
+            Some(cancel_at),
+            false,
+            &tool_started_sig(),
+            cancel_at,
+            current
+        )
+        .is_some());
     }
 
     #[test]
@@ -7924,6 +7963,7 @@ mod tests {
             None,
             false,
             &LifecycleSignal::Progress,
+            now,
             now + CANCEL_ESCALATION_GRACE
         )
         .is_none());
@@ -7936,6 +7976,26 @@ mod tests {
             Some(cancel_at),
             true,
             &LifecycleSignal::Progress,
+            cancel_at,
+            cancel_at + CANCEL_ESCALATION_GRACE,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn post_cancel_fast_deadline_ignores_signal_observed_before_cancel() {
+        // #1908 review (CodeRabbit): an envelope observed before the Stop
+        // click can still be sitting in the lifecycle channel when
+        // ClientCmd::Cancel wins the select loop. Processing it afterward
+        // must NOT arm fast escalation, or a cooperative agent that honored
+        // the cancel gets force-restarted after 2s on pre-cancel activity.
+        let cancel_at = tokio::time::Instant::now();
+        let observed_before = cancel_at - std::time::Duration::from_millis(1);
+        assert!(post_cancel_fast_deadline(
+            Some(cancel_at),
+            false,
+            &LifecycleSignal::Progress,
+            observed_before,
             cancel_at + CANCEL_ESCALATION_GRACE,
         )
         .is_none());
@@ -7954,7 +8014,10 @@ mod tests {
                 off_protocol_work: None,
             },
         ] {
-            assert!(post_cancel_fast_deadline(Some(cancel_at), false, &sig, current).is_none());
+            assert!(
+                post_cancel_fast_deadline(Some(cancel_at), false, &sig, cancel_at, current)
+                    .is_none()
+            );
         }
     }
 
@@ -7969,6 +8032,7 @@ mod tests {
             Some(cancel_at),
             false,
             &LifecycleSignal::Progress,
+            cancel_at,
             orphan_deadline,
         )
         .expect("should arm");
@@ -7982,9 +8046,16 @@ mod tests {
         // deadline is already in the past, so the timer fires immediately.
         let cancel_at = tokio::time::Instant::now();
         let current = cancel_at + CANCEL_ESCALATION_GRACE;
-        let fast =
-            post_cancel_fast_deadline(Some(cancel_at), false, &LifecycleSignal::Progress, current)
-                .unwrap();
+        // Observed well after the click (still >= cancel_at, so it qualifies).
+        let observed_late = cancel_at + std::time::Duration::from_secs(5);
+        let fast = post_cancel_fast_deadline(
+            Some(cancel_at),
+            false,
+            &LifecycleSignal::Progress,
+            observed_late,
+            current,
+        )
+        .unwrap();
         // Deadline is anchored to the click + 2s, independent of when the
         // signal was observed, so a signal seen at +5s still escalates at +2s.
         assert_eq!(fast, cancel_at + POST_CANCEL_PROGRESS_GRACE);
@@ -8006,6 +8077,7 @@ mod tests {
                     id: format!("fill-{i}"),
                     is_background_task: false,
                 },
+                observed_at: tokio::time::Instant::now(),
             })
             .expect("pre-fill fits the channel");
         }
@@ -10770,6 +10842,7 @@ mod tests {
             signal: LifecycleSignal::WakeupPending {
                 at: chrono::Utc::now(),
             },
+            observed_at: tokio::time::Instant::now(),
         };
         assert_eq!(env.epoch, 42);
         assert!(matches!(env.signal, LifecycleSignal::WakeupPending { .. }));
