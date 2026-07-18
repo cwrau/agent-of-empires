@@ -258,6 +258,11 @@ pub struct TuiTestHarness {
     /// daemon env) because the daemon `env_clear`s and allowlists env before
     /// spawning the worker, so a `set_env` knob would never reach the fake.
     acp_fork_fail: bool,
+    /// When true, `install_acp_shim` bakes `FAKE_ACP_IGNORE_CANCEL=1` into the
+    /// shim so the fake agent ignores `session/cancel` and keeps streaming,
+    /// modelling opencode 1.15.13 (#1908). Baked into the shim for the same
+    /// reason as `acp_fork_fail`.
+    acp_ignore_cancel: bool,
 }
 
 #[allow(dead_code)]
@@ -358,6 +363,7 @@ last_seen_version = "{}"
             extra_path_dirs: Vec::new(),
             stop_daemon_on_drop: false,
             acp_fork_fail: false,
+            acp_ignore_cancel: false,
         }
     }
 
@@ -390,6 +396,14 @@ last_seen_version = "{}"
         self.acp_fork_fail = true;
     }
 
+    /// Make the fake ACP agent ignore `session/cancel` and keep streaming
+    /// (models opencode 1.15.13, #1908). Must be called BEFORE
+    /// `install_acp_shim` so the knob is baked into the shim, for the same
+    /// reason as `set_acp_fork_fail`.
+    pub fn set_acp_ignore_cancel(&mut self) {
+        self.acp_ignore_cancel = true;
+    }
+
     /// Install the shared Node fake-ACP agent as the `claude`,
     /// `claude-agent-acp`, and `aoe-agent` commands on PATH. The structured view
     /// supervisor resolves the `claude` tool key to the `claude-agent-acp`
@@ -416,11 +430,17 @@ last_seen_version = "{}"
         } else {
             ""
         };
+        let ignore_cancel_line = if self.acp_ignore_cancel {
+            "export FAKE_ACP_IGNORE_CANCEL=\"1\"\n"
+        } else {
+            ""
+        };
         let script = format!(
-            "#!/bin/sh\nexport FAKE_ACP_SCRIPT=\"{}\"\nexport FAKE_ACP_DEBUG_LOG=\"{}\"\n{}exec node \"{}\" \"$@\"\n",
+            "#!/bin/sh\nexport FAKE_ACP_SCRIPT=\"{}\"\nexport FAKE_ACP_DEBUG_LOG=\"{}\"\n{}{}exec node \"{}\" \"$@\"\n",
             fake_acp_script.display(),
             debug_log.display(),
             fork_fail_line,
+            ignore_cancel_line,
             fake_agent.display(),
         );
         for name in ["claude", "claude-agent-acp", "aoe-agent"] {

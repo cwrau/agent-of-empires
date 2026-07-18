@@ -222,6 +222,12 @@ const DEFAULT_PERMISSION_OPTIONS = [
 // "cancelled" instead of running the rest of the scripted updates.
 const cancelFlags = new Map();
 
+// #1908: when FAKE_ACP_IGNORE_CANCEL is set, the fake models an agent
+// (opencode 1.15.13) that ignores session/cancel entirely: it keeps
+// emitting scripted updates instead of short-circuiting on the cancel
+// flag, so aoe's post-cancel-progress escalation is exercised.
+const IGNORE_CANCEL = process.env.FAKE_ACP_IGNORE_CANCEL === "1";
+
 // OpenCode-shaped mode advertisement (#1764). When
 // FAKE_ACP_MODE_VIA_CONFIG_OPTION is set, the fake advertises its modes
 // ONLY as a `category:"mode"` config option (no ACP SessionModeState
@@ -288,7 +294,7 @@ function buildSessionConfigOptions(sessionId) {
 
 async function emitSessionUpdates(sessionId, updates) {
   for (const u of updates) {
-    if (cancelFlags.get(sessionId)) return;
+    if (!IGNORE_CANCEL && cancelFlags.get(sessionId)) return;
     if (u && u.sessionUpdate === "wait_ms") {
       // Story-spec helper: pause emission inside a turn so the UI
       // observes the turn as active long enough to click Stop, queue a
@@ -304,7 +310,7 @@ async function emitSessionUpdates(sessionId, updates) {
       const sliceMs = 50;
       let remaining = ms;
       while (remaining > 0) {
-        if (cancelFlags.get(sessionId)) return;
+        if (!IGNORE_CANCEL && cancelFlags.get(sessionId)) return;
         const slice = Math.min(sliceMs, remaining);
         await new Promise((resolve) => setTimeout(resolve, slice));
         remaining -= slice;
