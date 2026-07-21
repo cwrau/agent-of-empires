@@ -1474,44 +1474,48 @@ mod tests {
     #[test]
     fn manual_force_bypasses_only_the_disabled_gate() {
         // The manual "Auto-name now" action calls check_eligible with
-        // `setting_on = cfg.setting_on || force`. When smart_rename is off,
-        // the automatic path (force = false) is Disabled, but the manual path
-        // (force = true) proceeds (#3039).
+        // `setting_on = cfg.setting_on || force`. `auto` is the (off) setting,
+        // `force` is the manual flag; the automatic path is `auto` alone,
+        // the manual path is `auto || force`. Both are bindings, not literals,
+        // so the boolean expression documents the real call shape (#3039).
         let c = Some(claude());
-        let setting_off = false;
+        let auto = false;
+        let force = true;
         assert_eq!(
-            check_eligible(true, setting_off || false, "Vikings", c, false, "", false),
+            check_eligible(true, auto, "Vikings", c, false, "", false),
             Err(SkipReason::Disabled),
             "automatic path must still honor the disabled setting"
         );
         assert!(
-            check_eligible(true, setting_off || true, "Vikings", c, false, "", false).is_ok(),
+            check_eligible(true, auto || force, "Vikings", c, false, "", false).is_ok(),
             "manual force must bypass the disabled gate"
         );
         // Forcing past Disabled must not smuggle past any other gate: an
         // otherwise-ineligible session is still rejected on the forced path.
         assert_eq!(
-            check_eligible(true, setting_off || true, "Vikings", c, true, "", false),
+            check_eligible(true, auto || force, "Vikings", c, true, "", false),
             Err(SkipReason::Sandboxed),
             "sandbox gate still applies when forced"
         );
         assert_eq!(
-            check_eligible(
-                true,
-                setting_off || true,
-                "Fix login bug",
-                c,
-                false,
-                "",
-                false
-            ),
+            check_eligible(true, auto || force, "Fix login bug", c, false, "", false),
             Err(SkipReason::NameNotDefault),
             "already-named gate still applies when forced"
         );
         assert_eq!(
-            check_eligible(false, setting_off || true, "Vikings", c, false, "", false),
+            check_eligible(false, auto || force, "Vikings", c, false, "", false),
             Err(SkipReason::NotStructured),
             "structured gate still applies when forced"
+        );
+        assert_eq!(
+            check_eligible(true, auto || force, "Vikings", None, false, "", false),
+            Err(SkipReason::NoOneshot),
+            "no-one-shot gate still applies when forced"
+        );
+        assert_eq!(
+            check_eligible(true, auto || force, "Vikings", c, false, "", true),
+            Err(SkipReason::CommandOverridden),
+            "command-override gate still applies when forced"
         );
     }
 
