@@ -456,6 +456,10 @@ pub async fn spawn_acp(
     match spawn_result {
         Ok(()) => {
             if let Some(resets_at) = rate_limit_resume_resets_at {
+                // Continue the rate-limit-interrupted turn instead of leaving
+                // the resumed agent idle; the pending-turn drain delivers it
+                // once the worker is live (#3028).
+                crate::server::acp_reconciler::enqueue_rate_limit_continuation(&state, &id).await;
                 state
                     .acp_supervisor
                     .publish_rate_limit_auto_resumed(&id, resets_at);
@@ -469,6 +473,7 @@ pub async fn spawn_acp(
         }
         Err(SupervisorError::AlreadyRunning(_)) if rate_limit_resume_resets_at.is_some() => {
             if let Some(resets_at) = rate_limit_resume_resets_at {
+                crate::server::acp_reconciler::enqueue_rate_limit_continuation(&state, &id).await;
                 state
                     .acp_supervisor
                     .publish_rate_limit_auto_resumed(&id, resets_at);

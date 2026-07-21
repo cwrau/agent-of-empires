@@ -538,6 +538,54 @@ impl SessionService {
         }
     }
 
+    /// Queue `text` as the session's next turn, reusing the pending-initial-
+    /// turn drain so the turn is delivered once the (resumed) worker is live.
+    /// No-op when a turn is already queued (never clobber a create/plugin
+    /// turn) or the session is gone. Persists so a daemon restart mid-resume
+    /// still re-delivers. Used to continue a rate-limit-interrupted turn on
+    /// resume (#3028).
+    #[cfg(feature = "serve")]
+    pub(crate) async fn set_pending_initial_turn(self: &Arc<Self>, id: &str, text: String) {
+        let profile = {
+            let mut instances = self.instances.write().await;
+            match instances.iter_mut().find(|i| i.id == id) {
+                Some(inst) if inst.pending_initial_turn.is_none() => {
+                    inst.pending_initial_turn = Some(text.clone());
+                    inst.source_profile.clone()
+                }
+                _ => return,
+            }
+        };
+        match crate::session::Storage::new(&profile, self.file_watch.clone()) {
+            Ok(storage) => {
+                let id_persist = id.to_string();
+                let persisted = tokio::task::spawn_blocking(move || {
+                    storage.update(|instances, _groups| {
+                        if let Some(inst) = instances.iter_mut().find(|i| i.id == id_persist) {
+                            inst.pending_initial_turn = Some(text);
+                        }
+                        Ok(())
+                    })
+                })
+                .await;
+                if !matches!(persisted, Ok(Ok(()))) {
+                    tracing::warn!(
+                        target: "acp.supervisor",
+                        session = %id,
+                        "failed to persist resume continuation turn; it still drains this daemon life"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "acp.supervisor",
+                    session = %id,
+                    "failed to open storage for resume continuation turn: {e}"
+                );
+            }
+        }
+    }
+
     /// Same lazy per-instance mutex registry as `AppState::instance_lock`;
     /// both operate on the shared map, so a lock taken through either handle
     /// excludes the other.
