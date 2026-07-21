@@ -2353,6 +2353,13 @@
       "components": ["web/src/components/WorkspaceSidebar.tsx"]
     },
     {
+      "id": "story.rate-limit-resume-continuation",
+      "kind": "live-playwright",
+      "risk": "high",
+      "specs": ["tests/live/acp-stories/rate-limit-resume-continuation.spec.ts"],
+      "components": ["web/src/components/acp/StructuredView.tsx", "web/src/hooks/useRespawnSession.ts"]
+    },
+    {
       "id": "sidebar.rate-limit-hook",
       "kind": "vitest",
       "risk": "medium",
