@@ -2770,13 +2770,14 @@ pub async fn force_smart_rename(
         return resp;
     }
 
-    let Some((profile, tool, command, sandboxed, title, structured)) = ({
+    let Some((profile, tool, command, project_path, sandboxed, title, structured)) = ({
         let instances = state.instances.read().await;
         instances.iter().find(|i| i.id == id).map(|i| {
             (
                 i.source_profile.clone(),
                 i.tool.clone(),
                 i.command.clone(),
+                i.project_path.clone(),
                 i.is_sandboxed(),
                 i.title.clone(),
                 i.is_structured(),
@@ -2790,20 +2791,26 @@ pub async fn force_smart_rename(
     // action never reports success (202) for a session the gate would silently
     // drop (sandboxed, or a resolved rename agent with no one-shot / an
     // overridden command). Without this, the sidebar would show success while
-    // no title job runs. Passes `setting_on = true` because this is the manual
-    // "Auto-name now" action, which runs on demand even when auto-rename-on-
-    // start is disabled (#3039); the spawned try_smart_rename gets `force =
-    // true` below to match.
-    let config = crate::session::profile_config::resolve_config_or_warn(&profile);
+    // no title job runs. Resolves with the SAME repo-aware config the worker
+    // uses (resolve_config_with_repo_or_warn), so a repo-local smart_rename_agent
+    // or agent_command_override cannot make the preflight and worker disagree.
+    // Passes `setting_on = true` because this is the manual "Auto-name now"
+    // action, which runs on demand even when auto-rename-on-start is disabled
+    // (#3039); the spawned try_smart_rename gets `force = true` below to match.
+    let resolved = crate::session::repo_config::resolve_config_with_repo_or_warn(
+        &profile,
+        std::path::Path::new(&project_path),
+    );
+    let config = &resolved.session;
     if let Err(reason) = crate::session::smart_rename::check_eligible_resolved(
         structured,
         true,
         &title,
         &tool,
-        &config.session.smart_rename_agent,
+        &config.smart_rename_agent,
         sandboxed,
         &command,
-        &config.session.agent_command_override,
+        &config.agent_command_override,
     ) {
         use crate::session::smart_rename::SkipReason;
         let (status, message) = match reason {
