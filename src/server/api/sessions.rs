@@ -2788,13 +2788,16 @@ pub async fn force_smart_rename(
 
     // Preflight the SAME gate the spawned try_smart_rename re-applies, so the
     // action never reports success (202) for a session the gate would silently
-    // drop (disabled, sandboxed, or a resolved rename agent with no one-shot /
-    // an overridden command). Without this, the sidebar would show success
-    // while no title job runs.
+    // drop (sandboxed, or a resolved rename agent with no one-shot / an
+    // overridden command). Without this, the sidebar would show success while
+    // no title job runs. Passes `setting_on = true` because this is the manual
+    // "Auto-name now" action, which runs on demand even when auto-rename-on-
+    // start is disabled (#3039); the spawned try_smart_rename gets `force =
+    // true` below to match.
     let config = crate::session::profile_config::resolve_config_or_warn(&profile);
     if let Err(reason) = crate::session::smart_rename::check_eligible_resolved(
         structured,
-        config.session.smart_rename,
+        true,
         &title,
         &tool,
         &config.session.smart_rename_agent,
@@ -2858,6 +2861,8 @@ pub async fn force_smart_rename(
             first_user_prompt,
             context,
         },
+        // Manual action forces past the smart_rename-disabled gate (#3039).
+        true,
     ));
     StatusCode::ACCEPTED.into_response()
 }

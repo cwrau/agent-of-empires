@@ -1035,10 +1035,18 @@ mod serve {
     /// re-checked under the per-session lock before the title is written, so
     /// a manual rename (or a deletion) that lands during the one-shot call
     /// always wins.
+    ///
+    /// `force` bypasses only the `smart_rename`-disabled gate: the manual
+    /// "Auto-name now" action runs on demand even when auto-rename-on-start is
+    /// off (#3039), mirroring how the manual summary bypasses the
+    /// `conversation_summary` setting (#2808). The automatic listener passes
+    /// `false`; every other gate (structured, name-not-default, sandbox,
+    /// one-shot support, command override) still applies on both paths.
     pub async fn try_smart_rename(
         state: Arc<AppState>,
         session_id: String,
         input: SmartRenameInput,
+        force: bool,
     ) {
         if input.first_user_prompt.trim().is_empty() {
             return;
@@ -1076,7 +1084,7 @@ mod serve {
         let cfg = resolve_smart_rename_config(&resolved.session);
         let agent = match check_eligible_resolved(
             structured,
-            cfg.setting_on,
+            cfg.setting_on || force,
             &title,
             &tool,
             cfg.rename_agent,
@@ -1461,6 +1469,50 @@ mod tests {
         );
         // Command equal to the agent binary is not an override.
         assert!(check_eligible(true, true, "Vikings", c, false, "claude", false).is_ok());
+    }
+
+    #[test]
+    fn manual_force_bypasses_only_the_disabled_gate() {
+        // The manual "Auto-name now" action calls check_eligible with
+        // `setting_on = cfg.setting_on || force`. When smart_rename is off,
+        // the automatic path (force = false) is Disabled, but the manual path
+        // (force = true) proceeds (#3039).
+        let c = Some(claude());
+        let setting_off = false;
+        assert_eq!(
+            check_eligible(true, setting_off || false, "Vikings", c, false, "", false),
+            Err(SkipReason::Disabled),
+            "automatic path must still honor the disabled setting"
+        );
+        assert!(
+            check_eligible(true, setting_off || true, "Vikings", c, false, "", false).is_ok(),
+            "manual force must bypass the disabled gate"
+        );
+        // Forcing past Disabled must not smuggle past any other gate: an
+        // otherwise-ineligible session is still rejected on the forced path.
+        assert_eq!(
+            check_eligible(true, setting_off || true, "Vikings", c, true, "", false),
+            Err(SkipReason::Sandboxed),
+            "sandbox gate still applies when forced"
+        );
+        assert_eq!(
+            check_eligible(
+                true,
+                setting_off || true,
+                "Fix login bug",
+                c,
+                false,
+                "",
+                false
+            ),
+            Err(SkipReason::NameNotDefault),
+            "already-named gate still applies when forced"
+        );
+        assert_eq!(
+            check_eligible(false, setting_off || true, "Vikings", c, false, "", false),
+            Err(SkipReason::NotStructured),
+            "structured gate still applies when forced"
+        );
     }
 
     #[test]

@@ -4945,6 +4945,9 @@ async fn acp_event_listener(state: Arc<AppState>) {
                             first_user_prompt,
                             context,
                         },
+                        // Automatic turn-end trigger: honor the smart_rename
+                        // setting. Only the manual action forces past it (#3039).
+                        false,
                     )
                     .await;
                 });
