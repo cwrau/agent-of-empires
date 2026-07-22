@@ -45,7 +45,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -59,7 +59,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use super::worker_registry::{self, WorkerRecord};
-use crate::acp::control_protocol::{self, ControlBody};
+use crate::acp::control_protocol::{self, ControlBody, PromptOutcome};
 use crate::process::worker::RunnerRecordState;
 
 /// How often the abandonment watchdog inspects its own registry record.
@@ -343,13 +343,22 @@ pub async fn run(args: AcpRunnerArgs) -> Result<()> {
         args.session_id.clone(),
     ));
 
-    // Control-channel accept loop (#1054 Phase A). Serves the sibling
-    // `<id>.control.sock`, over which the runner reports native
-    // turn-complete signals. Independent of the main byte-relay accept
+    // Wrap agent stdin in a tokio Mutex so both accept loops can hand it
+    // to one connection at a time. Wrapping (not splitting) keeps stdin
+    // alive across reconnects; closing it would cause aoe-agent to
+    // `process.exit(0)`. The control loop needs it too now that the runner
+    // owns the handshake and issues `session/prompt` itself (#2976).
+    let agent_stdin = Arc::new(Mutex::new(agent_stdin));
+
+    // Control-channel accept loop. Serves the sibling `<id>.control.sock`,
+    // over which the runner drives the ACP handshake it owns and the turn
+    // request/response (#2976 Phase B), and reports native turn-complete
+    // signals (#1054 Phase A). Independent of the main byte-relay accept
     // loop; a daemon attaches to both. Detached like the stderr drainer:
     // the process teardown drops it.
     let control_shared = Arc::clone(&shared);
     let control_session = args.session_id.clone();
+    let control_stdin = Arc::clone(&agent_stdin);
     let control_accept_task = tokio::spawn(async move {
         loop {
             match control_listener.accept().await {
@@ -362,6 +371,7 @@ pub async fn run(args: AcpRunnerArgs) -> Result<()> {
                     handle_control_connection(
                         stream,
                         Arc::clone(&control_shared),
+                        Arc::clone(&control_stdin),
                         control_session.clone(),
                     )
                     .await;
@@ -378,12 +388,6 @@ pub async fn run(args: AcpRunnerArgs) -> Result<()> {
             }
         }
     });
-
-    // Wrap agent stdin in a tokio Mutex so the accept loop can hand it
-    // to one connection at a time. Wrapping (not splitting) keeps stdin
-    // alive across reconnects; closing it would cause aoe-agent to
-    // `process.exit(0)`.
-    let agent_stdin = Arc::new(Mutex::new(agent_stdin));
 
     // Signal handling: SIGTERM/SIGINT → kill agent, cleanup, exit.
     let shutdown_signal = wait_for_shutdown();
@@ -689,6 +693,38 @@ struct RunnerShared {
     /// gap (buffer it for the next control attach). Set/cleared alongside
     /// `active_outbound`.
     main_attached: std::sync::atomic::AtomicBool,
+    /// Runner-owned ACP handshake cache (#2976 Phase B). Populated the
+    /// first time a v2 daemon drives `initialize` / `session/new|load|fork`
+    /// through the control channel; replayed verbatim on every later
+    /// attach so the agent is handshaken exactly once.
+    handshake: Mutex<RunnerHandshake>,
+    /// Monotonic JSON-RPC id allocator for the requests the runner issues
+    /// to the agent on its own (`initialize`, `session/*`, `session/prompt`)
+    /// now that it owns the client side of the protocol. On the v2 path the
+    /// daemon still issues `set_mode` / `set_config_option` / `delete_session`
+    /// over the relay to the same agent via the crate connection, but the
+    /// crate allocates UUID-string request ids (`RequestId::Str`), so they
+    /// can never match the runner's integer ids (`parse_response_id` reads
+    /// `as_i64`, which is `None` for a string) and the two id spaces cannot
+    /// overlap. The high [`RUNNER_REQUEST_ID_BASE`] seed is defense in depth
+    /// in case the crate ever switches to integer ids.
+    next_req_id: AtomicI64,
+    /// Responders for runner-issued request/response round-trips awaited
+    /// inline (`initialize`, `session/*`). The stdout fanout routes a
+    /// matching response into the oneshot and swallows it instead of
+    /// forwarding it to the daemon. Prompt responses are NOT here; they use
+    /// the async `prompt_requests` path that fires `PromptCompleted`.
+    pending_client_responses: Mutex<HashMap<i64, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+}
+
+/// Runner-owned ACP handshake state (#2976 Phase B).
+#[derive(Default)]
+struct RunnerHandshake {
+    /// Cached raw `initialize` result once the runner has run it.
+    initialized: Option<serde_json::Value>,
+    /// Cached `(acp_session_id, raw session response result)` once the
+    /// session is established.
+    session: Option<(String, serde_json::Value)>,
 }
 
 /// Control-channel state for the sibling `<id>.control.sock`. A single
@@ -703,6 +739,12 @@ struct ControlChannel {
     /// next control attach. ACP is serial per session, so at most one turn
     /// is ever legitimately pending; a newer completion supersedes.
     pending: Option<ControlBody>,
+    /// True while a v2 daemon (#2976 Phase B) holds the control channel.
+    /// The v2 channel is persistent: it carries the handshake and every
+    /// turn, so `emit_control` must retain the outbound after a
+    /// `PromptCompleted` write instead of the Phase A one-shot teardown
+    /// (which delivers a single adopted-turn completion and closes).
+    persistent: bool,
 }
 
 /// JSON-RPC peek for outstanding-request tracking. Pulls only the
@@ -729,6 +771,14 @@ const PERMISSION_METHOD: &str = "session/request_permission";
 /// a native `PromptCompleted` when the matching response comes back on
 /// the agent to daemon path. Phase A of #1054.
 const PROMPT_METHOD: &str = "session/prompt";
+
+/// Seed for the runner's own agent-bound JSON-RPC ids (#2976 Phase B). The
+/// crate `ConnectionTo` on the daemon side allocates UUID-string ids for
+/// the `set_mode` / `set_config_option` / `delete_session` requests it
+/// still sends over the relay on the v2 path, so those never collide with
+/// the runner's integer ids by construction. This high seed is only defense
+/// in depth against a future crate change to integer ids.
+const RUNNER_REQUEST_ID_BASE: i64 = 1 << 48;
 
 /// Deadline for a single control-channel frame write. `emit_control`
 /// holds the `control` mutex across the write and runs on the sole
@@ -774,12 +824,31 @@ impl RunnerShared {
             prompt_requests: Mutex::new(HashSet::new()),
             control: Mutex::new(ControlChannel::default()),
             main_attached: std::sync::atomic::AtomicBool::new(false),
+            handshake: Mutex::new(RunnerHandshake::default()),
+            next_req_id: AtomicI64::new(RUNNER_REQUEST_ID_BASE),
+            pending_client_responses: Mutex::new(HashMap::new()),
         }
     }
 
     /// Forward a line to the daemon if attached; else buffer. Returns
-    /// whether forwarding happened (false → buffered).
+    /// whether forwarding happened (false → buffered/consumed).
     async fn deliver_line(&self, line: &[u8]) -> bool {
+        // #2976 Phase B: a response to a request the RUNNER issued
+        // (`initialize` / `session/*` during the runner-owned handshake) is
+        // consumed here and never forwarded to the daemon, which drives
+        // those over the control channel and would drop the stray response.
+        // Agent server->client requests (id + method) and notifications
+        // (no id) are not runner responses and fall through to the relay.
+        if let Some(id) = parse_response_id(line) {
+            let responder = self.pending_client_responses.lock().await.remove(&id);
+            if let Some(tx) = responder {
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) {
+                    let _ = tx.send(value);
+                }
+                return false;
+            }
+        }
+
         // Peek-parse outgoing agent → daemon traffic to track outstanding
         // requests. A line with both a numeric `id` and a `method` is a
         // request the agent is making to the daemon; record it so we can
@@ -808,11 +877,11 @@ impl RunnerShared {
         // of `note_daemon_response`). Independent of the byte-relay
         // outbound below, since the control channel is a separate socket.
         if !self.prompt_requests.lock().await.is_empty() {
-            if let Some((id, stop_reason)) = parse_response(line) {
+            if let Some((id, outcome)) = parse_response(line) {
                 if self.prompt_requests.lock().await.remove(&id) {
                     self.emit_control(ControlBody::PromptCompleted {
                         prompt_req_id: id,
-                        stop_reason,
+                        outcome,
                     })
                     .await;
                 }
@@ -1014,10 +1083,18 @@ impl RunnerShared {
         let mut ch = self.control.lock().await;
         if let Some(out) = ch.outbound.as_mut() {
             let ok = write_control_frame(out, &body).await;
-            ch.outbound = None;
+            // v2 (#2976): the control channel is persistent, so keep the
+            // outbound after a successful write to carry later turns. Phase
+            // A tears it down: it delivers one adopted-turn completion per
+            // attach and must never write to a socket the daemon stopped
+            // reading.
             if ok {
+                if !ch.persistent {
+                    ch.outbound = None;
+                }
                 return;
             }
+            ch.outbound = None;
             // Dead or stalled control socket. A control daemon had dialed
             // in (this is the resume/adopted-turn path), so this completion
             // is real and was not received: buffer it unconditionally for
@@ -1041,37 +1118,233 @@ impl RunnerShared {
         ch.pending = Some(body);
     }
 
-    /// Install a control-channel write half: greet with `Hello`, then under
-    /// the same lock either hand off the one buffered completion (and leave
-    /// the outbound unset, since that is the adopted turn's single frame)
-    /// or store the write half to deliver the completion live later.
-    async fn install_control_outbound(
+    async fn clear_control_outbound(&self) {
+        let mut ch = self.control.lock().await;
+        ch.outbound = None;
+        ch.persistent = false;
+    }
+
+    /// Install the v2 (#2976) control write half: greet with `Hello`, then
+    /// under the control lock mark the channel persistent, drain any
+    /// completion buffered across a no-daemon gap, and retain the outbound
+    /// so the handshake and every turn's `PromptCompleted` can be written
+    /// to it. Returns false if the initial `Hello` write failed.
+    async fn install_v2_control(
         &self,
-        mut out: tokio::net::unix::OwnedWriteHalf,
+        out: &mut Option<tokio::net::unix::OwnedWriteHalf>,
         session_id: &str,
-    ) {
+    ) -> bool {
         let hello = ControlBody::Hello {
             control_protocol_version: control_protocol::CONTROL_PROTOCOL_VERSION,
             session_id: session_id.to_string(),
         };
-        if !write_control_frame(&mut out, &hello).await {
-            return;
+        let mut w = out.take().expect("write half present");
+        if !write_control_frame(&mut w, &hello).await {
+            return false;
         }
-        let mut ch = self.control.lock().await;
-        if let Some(body) = ch.pending.take() {
-            if !write_control_frame(&mut out, &body).await {
-                ch.pending = Some(body);
+        let pending = {
+            let mut ch = self.control.lock().await;
+            ch.persistent = true;
+            ch.pending.take()
+        };
+        if let Some(body) = pending {
+            if !write_control_frame(&mut w, &body).await {
+                self.control.lock().await.pending = Some(body);
+                return false;
             }
-            // Delivered (or failed on a dead/stalled socket); one completion
-            // per attach, so do not retain the outbound.
-            return;
         }
-        ch.outbound = Some(out);
+        self.control.lock().await.outbound = Some(w);
+        true
     }
 
-    async fn clear_control_outbound(&self) {
-        self.control.lock().await.outbound = None;
+    /// Serialize a JSON value as one ndjson line to the agent's stdin.
+    /// Returns false if serialization or the write failed.
+    async fn write_agent_line(
+        &self,
+        agent_stdin: &Mutex<tokio::process::ChildStdin>,
+        value: &serde_json::Value,
+    ) -> bool {
+        let mut bytes = match serde_json::to_vec(value) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        bytes.push(b'\n');
+        let mut stdin = agent_stdin.lock().await;
+        stdin.write_all(&bytes).await.is_ok() && stdin.flush().await.is_ok()
     }
+
+    /// Issue a runner-owned JSON-RPC request to the agent and await the
+    /// full response line as JSON. Used for the handshake requests the
+    /// runner now owns (`initialize`, `session/new|load|fork`). Returns
+    /// None if the write failed or the agent closed before answering.
+    async fn agent_request(
+        &self,
+        agent_stdin: &Mutex<tokio::process::ChildStdin>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let id = self.next_req_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_client_responses.lock().await.insert(id, tx);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        if !self.write_agent_line(agent_stdin, &req).await {
+            self.pending_client_responses.lock().await.remove(&id);
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// Issue a runner-owned `session/prompt` to the agent. The response is
+    /// detected asynchronously by the stdout fanout (via `prompt_requests`),
+    /// which fires `PromptCompleted`. Returns the assigned request id, or
+    /// None if the write failed.
+    async fn agent_prompt(
+        &self,
+        agent_stdin: &Mutex<tokio::process::ChildStdin>,
+        params: serde_json::Value,
+    ) -> Option<i64> {
+        let id = self.next_req_id.fetch_add(1, Ordering::Relaxed);
+        self.prompt_requests.lock().await.insert(id);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": PROMPT_METHOD,
+            "params": params,
+        });
+        if !self.write_agent_line(agent_stdin, &req).await {
+            self.prompt_requests.lock().await.remove(&id);
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Issue a `session/cancel` notification for the established session.
+    async fn agent_cancel(
+        &self,
+        agent_stdin: &Mutex<tokio::process::ChildStdin>,
+        acp_session_id: &str,
+    ) {
+        let note = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": acp_session_id },
+        });
+        let _ = self.write_agent_line(agent_stdin, &note).await;
+    }
+
+    /// Run (once) or replay (from cache) the ACP `initialize` the runner
+    /// now owns. On first call it sends `initialize` to the agent and
+    /// caches the raw result; later calls return the cache without touching
+    /// the agent. `Ok` carries the result to hand back as
+    /// `ControlBody::Initialized`; `Err` is the raw JSON-RPC error object
+    /// for `ControlBody::HandshakeFailed`.
+    async fn run_or_replay_initialize(
+        &self,
+        agent_stdin: &Mutex<tokio::process::ChildStdin>,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        if let Some(cached) = self.handshake.lock().await.initialized.clone() {
+            return Ok(cached);
+        }
+        let response = self
+            .agent_request(agent_stdin, "initialize", request)
+            .await
+            .ok_or_else(|| transport_error("agent closed before answering initialize"))?;
+        let result = handshake_result(&response)?;
+        self.handshake.lock().await.initialized = Some(result.clone());
+        Ok(result)
+    }
+
+    /// Run (once) or replay (from cache) the session-creation request the
+    /// runner now owns. `method` is `session/new|load|fork`. Caches
+    /// `(acp_session_id, raw result)`; later calls replay the cache. `Ok`
+    /// carries `(acp_session_id, result)`; `Err` is the raw JSON-RPC error
+    /// object for `ControlBody::HandshakeFailed`.
+    async fn run_or_replay_session(
+        &self,
+        agent_stdin: &Mutex<tokio::process::ChildStdin>,
+        method: &str,
+        request: serde_json::Value,
+    ) -> Result<(String, serde_json::Value), serde_json::Value> {
+        if let Some(cached) = self.handshake.lock().await.session.clone() {
+            return Ok(cached);
+        }
+        let response = self
+            .agent_request(agent_stdin, method, request)
+            .await
+            .ok_or_else(|| transport_error(&format!("agent closed before answering {method}")))?;
+        let result = handshake_result(&response)?;
+        let acp_session_id = result
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| transport_error(&format!("{method} response missing sessionId")))?
+            .to_string();
+        let cached = (acp_session_id, result);
+        self.handshake.lock().await.session = Some(cached.clone());
+        Ok(cached)
+    }
+
+    /// The ACP session id the runner established, if any.
+    async fn acp_session_id(&self) -> Option<String> {
+        self.handshake
+            .lock()
+            .await
+            .session
+            .as_ref()
+            .map(|(id, _)| id.clone())
+    }
+
+    /// If a daemon re-sends a handshake request over the relay after the
+    /// runner already owns the session, answer it from cache instead of
+    /// forwarding a duplicate `initialize` / `session/*` to the
+    /// already-initialized agent. This guards the downgrade case where a v1
+    /// daemon (which drives the handshake over the relay) reattaches to a
+    /// runner a v2 daemon already handshook. Returns the synthesized
+    /// response line to send back to the daemon, or None to forward the
+    /// line to the agent unchanged.
+    async fn intercept_handshake(&self, line: &[u8]) -> Option<Vec<u8>> {
+        let (id, method) = parse_request(line)?;
+        let result = {
+            let hs = self.handshake.lock().await;
+            match method.as_str() {
+                "initialize" => hs.initialized.clone()?,
+                "session/new" | "session/load" | "session/fork" => {
+                    hs.session.as_ref().map(|(_, r)| r.clone())?
+                }
+                _ => return None,
+            }
+        };
+        let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        let mut bytes = serde_json::to_vec(&resp).ok()?;
+        bytes.push(b'\n');
+        Some(bytes)
+    }
+}
+
+/// Extract the `result` object from a runner-issued request's JSON-RPC
+/// response. On an `error` envelope, returns the raw error object so the
+/// daemon can reconstruct the crate error verbatim (preserving `data`); a
+/// response with neither result nor error synthesizes a minimal error.
+fn handshake_result(response: &serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
+    if let Some(err) = response.get("error") {
+        return Err(err.clone());
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| transport_error("response had neither result nor error"))
+}
+
+/// A synthetic JSON-RPC error object for a runner-side transport failure
+/// (agent closed, malformed response), shaped like an agent error so the
+/// daemon reconstructs it as a crate error uniformly.
+fn transport_error(message: &str) -> serde_json::Value {
+    serde_json::json!({ "code": -32603, "message": message })
 }
 
 /// Extract `(id, method)` from a JSON-RPC request line. Returns None
@@ -1139,7 +1412,8 @@ async fn read_frame_bounded<R: AsyncBufRead + Unpin>(
 }
 
 /// Peek fields of a JSON-RPC response line for turn-complete detection:
-/// the `result.stopReason` when the response succeeded.
+/// the `result.stopReason` when the response succeeded, or the `error`
+/// envelope when it failed.
 #[derive(Deserialize)]
 struct JsonRpcResponsePeek {
     #[serde(default)]
@@ -1148,26 +1422,49 @@ struct JsonRpcResponsePeek {
     method: Option<String>,
     #[serde(default)]
     result: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<JsonRpcErrorPeek>,
 }
 
-/// Parse a JSON-RPC response line into `(id, stop_reason)`. Returns None
-/// for requests (a `method` is present), notifications (no `id`),
-/// non-numeric ids, and malformed lines. An error-envelope response (no
-/// `result`) still counts as a completion, with `stop_reason` None; the
-/// turn ended either way, so the UI should stop showing "thinking".
-fn parse_response(line: &[u8]) -> Option<(i64, Option<String>)> {
+/// The JSON-RPC `error` object on a failed response.
+#[derive(Deserialize)]
+struct JsonRpcErrorPeek {
+    #[serde(default)]
+    code: i64,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+/// Parse a JSON-RPC response line into `(id, outcome)`. Returns None for
+/// requests (a `method` is present), notifications (no `id`), non-numeric
+/// ids, and malformed lines. An error-envelope response is surfaced as
+/// `PromptOutcome::Error` so the daemon can report it rather than
+/// collapse it into a silent stop; a success response carries the ACP
+/// `stopReason` when present.
+fn parse_response(line: &[u8]) -> Option<(i64, PromptOutcome)> {
     let peek: JsonRpcResponsePeek = serde_json::from_slice(line).ok()?;
     if peek.method.is_some() {
         return None;
     }
     let id = peek.id?.as_i64()?;
-    let stop_reason = peek
-        .result
-        .as_ref()
-        .and_then(|r| r.get("stopReason"))
-        .and_then(|s| s.as_str())
-        .map(|s| s.to_string());
-    Some((id, stop_reason))
+    let outcome = if let Some(err) = peek.error {
+        PromptOutcome::Error {
+            code: err.code,
+            message: err.message,
+            data: err.data,
+        }
+    } else {
+        let stop_reason = peek
+            .result
+            .as_ref()
+            .and_then(|r| r.get("stopReason"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        PromptOutcome::Completed { stop_reason }
+    };
+    Some((id, outcome))
 }
 
 /// Read agent stdout line-by-line (ndjson) and either forward to the
@@ -1225,6 +1522,13 @@ async fn handle_connection(
         match read_frame_bounded(&mut reader, &mut line).await {
             Ok(0) => break, // EOF: daemon closed the connection.
             Ok(_) => {
+                // #2976: once the runner owns the session, answer a relay
+                // handshake re-send from cache rather than double-initialize
+                // the agent (v1-daemon downgrade reattach).
+                if let Some(synth) = shared.intercept_handshake(&line).await {
+                    shared.deliver_line(&synth).await;
+                    continue;
+                }
                 shared.note_daemon_response(&line).await;
                 shared.note_prompt_request(&line).await;
                 let mut stdin = agent_stdin.lock().await;
@@ -1254,24 +1558,39 @@ async fn handle_connection(
     shared.clear_outbound().await;
 }
 
-/// Handle one control-channel connection: install its write half
-/// (greeting with `Hello` and draining buffered completion events), then
-/// read daemon to runner frames until EOF so a disconnect is detected.
-/// Phase A of #1054 has no daemon to runner frames that require action
-/// (the daemon's `Attach` just confirms the version), so the read loop
-/// exists only to observe the socket closing.
+/// Handle one control-channel connection (#2976 Phase B). Greets with
+/// `Hello`, installs the persistent write half (draining any completion
+/// buffered across a no-daemon gap), then drives the runner-owned protocol:
+///
+/// - `Initialize` / `EstablishSession` run (or replay from cache) the ACP
+///   handshake against the agent and answer with `Initialized` /
+///   `SessionReady` (or `HandshakeFailed`).
+/// - `Prompt` / `Cancel` issue a runner-owned `session/prompt` /
+///   `session/cancel`; the turn's `PromptCompleted` is fired
+///   asynchronously by the stdout fanout, so this loop does not block on it.
+///
+/// A v1 daemon never dials the control channel (it sees `Hello`'s v2
+/// version and falls back to the relay + resume-idle watchdog), so this
+/// loop only ever serves a v2 daemon; the read simply ends at EOF when the
+/// daemon detaches.
 async fn handle_control_connection(
     stream: UnixStream,
     shared: Arc<RunnerShared>,
+    agent_stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     session_id: String,
 ) {
     let (mut read_half, write_half) = stream.into_split();
-    shared
-        .install_control_outbound(write_half, &session_id)
-        .await;
+    let mut write_half = Some(write_half);
+    if !shared
+        .install_v2_control(&mut write_half, &session_id)
+        .await
+    {
+        shared.clear_control_outbound().await;
+        return;
+    }
     loop {
-        match control_protocol::read_frame(&mut read_half).await {
-            Ok(Some(_body)) => {}
+        let body = match control_protocol::read_frame(&mut read_half).await {
+            Ok(Some(body)) => body,
             Ok(None) => break, // clean EOF: daemon closed the control socket.
             Err(e) => {
                 warn!(
@@ -1281,6 +1600,51 @@ async fn handle_control_connection(
                 );
                 break;
             }
+        };
+        match body {
+            ControlBody::Attach { .. } => {}
+            ControlBody::Initialize { request } => {
+                let frame = match shared.run_or_replay_initialize(&agent_stdin, request).await {
+                    Ok(result) => ControlBody::Initialized { result },
+                    Err(error) => {
+                        warn!(target: "acp.runner", session = %session_id, "initialize failed: {error}");
+                        ControlBody::HandshakeFailed { error }
+                    }
+                };
+                shared.emit_control(frame).await;
+            }
+            ControlBody::EstablishSession { method, request } => {
+                let frame = match shared
+                    .run_or_replay_session(&agent_stdin, &method, request)
+                    .await
+                {
+                    Ok((acp_session_id, result)) => ControlBody::SessionReady {
+                        acp_session_id,
+                        result,
+                    },
+                    Err(error) => {
+                        warn!(target: "acp.runner", session = %session_id, "{method} failed: {error}");
+                        ControlBody::HandshakeFailed { error }
+                    }
+                };
+                shared.emit_control(frame).await;
+            }
+            ControlBody::Prompt { request } => {
+                if shared.agent_prompt(&agent_stdin, request).await.is_none() {
+                    warn!(
+                        target: "acp.runner",
+                        session = %session_id,
+                        "prompt write to agent failed; likely exited"
+                    );
+                }
+            }
+            ControlBody::Cancel => {
+                if let Some(acp_session_id) = shared.acp_session_id().await {
+                    shared.agent_cancel(&agent_stdin, &acp_session_id).await;
+                }
+            }
+            // Runner -> daemon frames should never arrive here; ignore.
+            _ => {}
         }
     }
     shared.clear_control_outbound().await;
@@ -1506,15 +1870,33 @@ mod tests {
     #[test]
     fn parse_response_extracts_stop_reason() {
         let line = br#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#;
-        assert_eq!(parse_response(line), Some((3, Some("end_turn".into()))));
+        assert_eq!(
+            parse_response(line),
+            Some((
+                3,
+                PromptOutcome::Completed {
+                    stop_reason: Some("end_turn".into())
+                }
+            ))
+        );
     }
 
     #[test]
-    fn parse_response_treats_error_envelope_as_completion() {
-        // An error response still ends the turn; detected as a completion
-        // with no stopReason.
-        let line = br#"{"jsonrpc":"2.0","id":4,"error":{"code":-32000,"message":"boom"}}"#;
-        assert_eq!(parse_response(line), Some((4, None)));
+    fn parse_response_surfaces_error_envelope() {
+        // An error response still ends the turn, now as a typed Error
+        // outcome (preserving data) rather than a silent completion.
+        let line = br#"{"jsonrpc":"2.0","id":4,"error":{"code":-32000,"message":"boom","data":{"errorKind":"rate_limit"}}}"#;
+        assert_eq!(
+            parse_response(line),
+            Some((
+                4,
+                PromptOutcome::Error {
+                    code: -32000,
+                    message: "boom".into(),
+                    data: Some(serde_json::json!({"errorKind": "rate_limit"})),
+                }
+            ))
+        );
     }
 
     #[test]
@@ -1560,7 +1942,9 @@ mod tests {
             shared.control.lock().await.pending,
             Some(ControlBody::PromptCompleted {
                 prompt_req_id: 5,
-                stop_reason: Some("end_turn".into()),
+                outcome: PromptOutcome::Completed {
+                    stop_reason: Some("end_turn".into()),
+                },
             })
         );
     }
@@ -1608,7 +1992,9 @@ mod tests {
 
         let body = ControlBody::PromptCompleted {
             prompt_req_id: 9,
-            stop_reason: Some("end_turn".into()),
+            outcome: PromptOutcome::Completed {
+                stop_reason: Some("end_turn".into()),
+            },
         };
         shared.emit_control(body.clone()).await;
 
