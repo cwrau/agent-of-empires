@@ -306,6 +306,20 @@ impl HttpClient {
         Ok(())
     }
 
+    /// `POST /api/sessions/{id}/smart-rename`: on-demand "Auto-name now" for a
+    /// structured session. The daemon forces past the `smart_rename`-disabled
+    /// gate and runs the one-shot detached; a 2xx means "started", not
+    /// "renamed" (the new title arrives over the structured-view WS).
+    pub async fn smart_rename(&self, session_id: &str) -> Result<(), HttpError> {
+        let url = format!(
+            "{}/api/sessions/{}/smart-rename",
+            self.endpoint.base_url, session_id
+        );
+        let res = self.auth(self.http.post(&url)).send().await?;
+        check_status(res, session_id).await?;
+        Ok(())
+    }
+
     /// `POST /api/sessions/{id}/acp/mode`: set the active session
     /// permission mode (an ACP `session/set_mode` round-trip). The new
     /// mode echoes back over the WebSocket as `CurrentModeChanged`;

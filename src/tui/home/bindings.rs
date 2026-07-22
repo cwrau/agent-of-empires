@@ -78,6 +78,11 @@ pub enum ActionId {
     /// Fork the selected session into a new independent session that resumes
     /// its conversation context (palette + context menu only; no chord).
     Fork,
+    /// Run the agent-driven "Auto-name now" one-shot for the selected
+    /// still-default-named session, on demand and even when auto-rename-on-start
+    /// is disabled (#3039). Terminal sessions rename locally; structured
+    /// sessions go through the daemon.
+    AutoName,
 }
 
 /// A single chord. `ctrl` requires the Control modifier; Shift is implicit in
@@ -915,6 +920,25 @@ pub static BINDINGS: &[Binding] = &[
             serve_only: false,
         }),
     },
+    // The mnemonic keys (a/A, n/N, r/R, t/T) are all taken and the home
+    // keyspace is saturated (see Fork above), so "Auto-name now" lands on the
+    // free v/V pair. Gated to a still-default-named session inside the handler.
+    Binding {
+        id: ActionId::AutoName,
+        non_strict: &[k('v')],
+        strict: &[k('V')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Auto-name session now (agent one-shot)",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Auto-name now",
+            keywords: &["rename", "title", "name", "auto", "smart", "generate"],
+            group: PaletteGroup::Actions,
+            serve_only: false,
+        }),
+    },
 ];
 
 /// Stable palette/test id for an action (matches the legacy `builtin_commands`
@@ -957,6 +981,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::Tips => "tips",
         ActionId::Plugins => "plugins",
         ActionId::Fork => "fork",
+        ActionId::AutoName => "auto-name",
     }
 }
 

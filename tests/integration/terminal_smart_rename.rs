@@ -142,7 +142,7 @@ async fn renames_civ_named_terminal_session_from_first_turn() {
     let renamed = tmux::Session::generate_name(&inst.id, "Fix login redirect");
     let _cleanup = TmuxCleanup(vec![name, renamed]);
 
-    smart_rename::run_terminal_rename("default", &inst.id)
+    smart_rename::run_terminal_rename("default", &inst.id, false)
         .await
         .expect("run_terminal_rename");
 
@@ -182,7 +182,7 @@ async fn never_overwrites_a_manual_title() {
     // A manual title is not eligible, so no rename/rekey happens here.
     let _cleanup = TmuxCleanup(vec![name]);
 
-    smart_rename::run_terminal_rename("default", &id)
+    smart_rename::run_terminal_rename("default", &id, false)
         .await
         .expect("run_terminal_rename");
 
