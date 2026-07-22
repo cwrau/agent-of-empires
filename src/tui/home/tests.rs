@@ -14720,6 +14720,89 @@ mod live_send_mode {
         assert!(env.view.has_non_live_send_overlay());
     }
 
+    /// Regression for the preview-mode paste misroute: a rename dialog
+    /// opened on top of live-send (reachable via the right-click context
+    /// menu, which stays clickable while "attached") must receive pastes.
+    /// Before the fix, `handle_paste` gave live-send absolute priority,
+    /// so the clipboard streamed into the agent's pane while the user was
+    /// staring at a focused dialog input; the key path had already been
+    /// taught to route to overlays, but paste hadn't.
+    #[test]
+    #[serial]
+    fn paste_routes_to_rename_dialog_opened_over_live_send() {
+        let mut env = create_test_env_with_sessions(1);
+        env.view.update_selected();
+        install_live_for_first_session(&mut env);
+        env.view.open_rename_for_selected();
+        assert!(env.view.rename_dialog.is_some());
+        assert!(
+            env.view.live_send.is_some(),
+            "live-send must stay active underneath the dialog"
+        );
+
+        env.view.handle_paste("pasted-title");
+
+        assert_eq!(
+            env.view.rename_dialog.as_ref().unwrap().title_value(),
+            "pasted-title",
+            "paste must land in the dialog's focused input, not the pane behind it"
+        );
+    }
+
+    /// Companion pin: with live-send active and NO overlay on top, paste
+    /// keeps streaming to the pane. The unit fixture has no worker
+    /// attached, so the observable contract is that the live-send branch
+    /// consumes the paste: nothing buffers into a compose dialog or
+    /// pending_paste.
+    #[test]
+    #[serial]
+    fn paste_in_pure_live_mode_is_consumed_by_live_send() {
+        let mut env = create_test_env_with_sessions(1);
+        env.view.update_selected();
+        install_live_for_first_session(&mut env);
+
+        env.view.handle_paste("streamed to pane");
+
+        assert!(env.view.send_message_dialog.is_none());
+        assert!(env.view.pending_paste.is_none());
+    }
+
+    /// A finalized preview highlight (installed via a mouse drag, which
+    /// never runs through `handle_key`) must be dropped when the user
+    /// pastes into a dialog opened over live-send. Before the clear was
+    /// hoisted to the top of `handle_paste`, only the pane-streaming
+    /// branch cleared it, so the highlight survived a dialog-routed paste
+    /// and kept repainting over stale cells after the dialog closed.
+    #[test]
+    #[serial]
+    fn paste_into_dialog_over_live_send_clears_preview_selection() {
+        let mut env = create_test_env_with_sessions(1);
+        env.view.update_selected();
+        install_live_for_first_session(&mut env);
+        env.view.preview_selection = Some(PreviewSelection {
+            anchor: (0, 0),
+            extent: (4, 2),
+            finalized: true,
+        });
+        env.view.open_rename_for_selected();
+        assert!(env.view.rename_dialog.is_some());
+        assert!(
+            env.view.preview_selection.is_some(),
+            "precondition: opening the dialog must not clear the selection"
+        );
+
+        env.view.handle_paste("pasted-title");
+
+        assert!(
+            env.view.preview_selection.is_none(),
+            "a dialog-routed paste must still drop the finalized highlight"
+        );
+        assert_eq!(
+            env.view.rename_dialog.as_ref().unwrap().title_value(),
+            "pasted-title"
+        );
+    }
+
     #[test]
     #[serial]
     fn refresh_preserves_cache_when_live_capture_fails() {

@@ -5661,26 +5661,41 @@ impl HomeView {
 
     /// Route a bracketed paste event to the active text input dialog.
     ///
-    /// Live-send mode wins above every dialog: a paste while the user is
-    /// "attached" should stream straight to the agent's pane, not buffer
-    /// in a dialog the user isn't even looking at. Text-input dialogs
-    /// (rename / send_message / new) come next so multi-line dictation
-    /// lands in whichever dialog the user is actively typing into. The
-    /// settings view is checked last; its paste handler strips newlines,
-    /// which would destroy multi-line dictation if we checked it first.
+    /// Live-send mode wins over every dialog as long as no overlay is
+    /// stacked on top of it: a paste while the user is "attached" should
+    /// stream straight to the agent's pane, not buffer in a dialog the
+    /// user isn't even looking at. But once an overlay HAS been opened
+    /// on top of live-send (via a right-click context menu, the
+    /// empty-sidebar click, or any future click-to-open path), the paste
+    /// must go to that overlay, exactly like the key path in
+    /// `handle_key` — otherwise the user sees a focused input field
+    /// while their clipboard silently lands in the pane behind it.
+    /// Text-input dialogs (rename / send_message / new) come next so
+    /// multi-line dictation lands in whichever dialog the user is
+    /// actively typing into. The settings view is checked last; its
+    /// paste handler strips newlines, which would destroy multi-line
+    /// dictation if we checked it first.
     pub fn handle_paste(&mut self, text: &str) {
-        if let Some(state) = self.live_send.clone() {
-            // Mirror the live-send key path: any interaction dismisses
-            // the finalized highlight so it doesn't follow agent output
-            // through subsequent renders.
-            self.clear_preview_selection();
-            if let Some(worker) = &self.live_send_worker {
-                for key in split_paste_for_live_send(text) {
-                    worker.send(key);
+        // Any paste drops a finalized preview-pane selection, exactly like
+        // `handle_key` clears it up front: the highlight pins to cell
+        // coords, so once the user pastes anywhere (the live-send pane, a
+        // dialog opened on top of live-send via the mouse, or the home
+        // view) the cells underneath can change and the highlight would
+        // point at unrelated content. Doing it here rather than only in
+        // the live-send branch keeps a mouse-driven drag-select ->
+        // right-click -> paste-into-dialog sequence from stranding the
+        // highlight, since that path never goes through `handle_key`.
+        self.clear_preview_selection();
+        if !self.has_non_live_send_overlay() {
+            if let Some(state) = self.live_send.clone() {
+                if let Some(worker) = &self.live_send_worker {
+                    for key in split_paste_for_live_send(text) {
+                        worker.send(key);
+                    }
                 }
+                self.stamp_last_accessed(&state.session_id);
+                return;
             }
-            self.stamp_last_accessed(&state.session_id);
-            return;
         }
         if let Some(ref mut dialog) = self.rename_dialog {
             dialog.handle_paste(text);
