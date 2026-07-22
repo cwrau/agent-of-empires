@@ -838,6 +838,7 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         Arc::clone(&file_watch),
         Arc::clone(&telemetry_session_creates),
         acp_supervisor.clone(),
+        acp_event_store.clone(),
     ));
     #[cfg(not(feature = "serve"))]
     let session_service = Arc::new(session_service::SessionService::new(
@@ -5437,6 +5438,7 @@ pub mod test_support {
             Arc::clone(&file_watch),
             Arc::clone(&telemetry_session_creates),
             supervisor.clone(),
+            event_store.clone(),
         ));
         Arc::new(AppState {
             profile: "test".to_string(),

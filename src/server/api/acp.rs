@@ -1184,6 +1184,12 @@ pub async fn acp_prompt(
         Ok(a) => a,
         Err((code, msg)) => return (code, msg).into_response(),
     };
+    // A fresh user prompt supersedes any queued rate-limit resume
+    // continuation, so drop it before sending: otherwise the reconciler could
+    // later replay the older interrupted prompt after this newer one (#3028).
+    // The drain path never routes through here, so this cannot race the
+    // continuation delivery itself.
+    state.session_service.clear_pending_initial_turn(&id).await;
     // Resume + publish + forward all live in the shared service so the
     // plugin host delivers turns through the same path (#2897).
     let outcome = state

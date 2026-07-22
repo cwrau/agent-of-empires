@@ -712,10 +712,23 @@ pub struct Instance {
     /// tick after a crash or restart) and clears it after a successful
     /// publish + forward. Delivery is at-least-once: a crash between the
     /// forward and this field's clear re-delivers on the next drain.
-    // ponytail: plain text, no attachments or dedup turn id; move to a typed
-    // record via a vNNN migration if either becomes necessary.
+    // ponytail: plain text plus a companion attachment-refs field below (no
+    // dedup turn id); fold both into a typed record via a vNNN migration if
+    // more turn state becomes necessary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_initial_turn: Option<String>,
+
+    /// Attachment refs for `pending_initial_turn` when the queued turn is a
+    /// rate-limit resume continuation replaying a prompt that carried
+    /// images/files (#3028). Metadata only; bytes stay in the acp_attachments
+    /// store and are reloaded at drain time. Empty for create-time initial
+    /// turns (those are text-only). `#[serde(default)]` + skip-when-empty keeps
+    /// pre-existing rows deserialising unchanged, so no migration is needed.
+    /// Serve-only: `PromptAttachmentRef` lives in the serve-gated `acp` module,
+    /// and only the structured-view resume path (serve) ever populates it.
+    #[cfg(feature = "serve")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_initial_turn_attachments: Vec<crate::acp::state::PromptAttachmentRef>,
 
     /// Explicit ACP approval-mode id this session should run under (#2897),
     /// applied via `session/set_mode` after every worker (re)spawn, taking
@@ -1347,6 +1360,8 @@ impl Instance {
             created_by_plugin: None,
             plugin_create_idempotency: None,
             pending_initial_turn: None,
+            #[cfg(feature = "serve")]
+            pending_initial_turn_attachments: Vec::new(),
             acp_mode_id: None,
             scratch: false,
             worktree_info: None,

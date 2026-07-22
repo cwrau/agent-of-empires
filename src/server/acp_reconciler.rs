@@ -1252,10 +1252,12 @@ async fn resume_one(state: Arc<AppState>, target: ResumeTarget) -> ResumeOutcome
 pub(crate) async fn enqueue_rate_limit_continuation(state: &Arc<AppState>, id: &str) {
     let store = Arc::clone(&state.acp_event_store);
     let id_owned = id.to_string();
-    let text = match tokio::task::spawn_blocking(move || store.rate_limited_turn_prompt(&id_owned))
-        .await
+    let (text, attachments) = match tokio::task::spawn_blocking(move || {
+        store.rate_limited_turn_prompt(&id_owned)
+    })
+    .await
     {
-        Ok(Some(text)) => text,
+        Ok(Some(prompt)) => prompt,
         Ok(None) => return,
         Err(e) => {
             tracing::warn!(
@@ -1268,7 +1270,7 @@ pub(crate) async fn enqueue_rate_limit_continuation(state: &Arc<AppState>, id: &
     };
     state
         .session_service
-        .set_pending_initial_turn(id, text)
+        .set_pending_initial_turn(id, text, attachments)
         .await;
 }
 

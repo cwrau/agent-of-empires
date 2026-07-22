@@ -1139,16 +1139,20 @@ impl EventStore {
         }
     }
 
-    /// Text of the user prompt whose turn was interrupted by a rate limit,
-    /// i.e. the latest `UserPromptSent` whose next terminal event is a
-    /// `Stopped{reason:"rate_limited"}`. Used on resume to re-issue the
-    /// interrupted prompt so the agent continues instead of sitting idle
-    /// (#3028). Returns `None` when the last turn completed normally, was
-    /// agent-initiated (its last user prompt has a non-rate-limit terminal
-    /// after it), or produced no prompt. `has_in_flight_turn` can't answer
-    /// this: the rate-limit park emits a `Stopped`, so the turn no longer
-    /// reads as in-flight; here we specifically match the rate-limit stop.
-    pub fn rate_limited_turn_prompt(&self, session_id: &str) -> Option<String> {
+    /// The user prompt whose turn was interrupted by a rate limit: the text
+    /// plus its attachment refs, from the latest `UserPromptSent` whose next
+    /// terminal event is a `Stopped{reason:"rate_limited"}`. Used on resume to
+    /// re-issue the interrupted prompt (with its images/files) so the agent
+    /// continues instead of sitting idle (#3028). Returns `None` when the last
+    /// turn completed normally, was agent-initiated (its last user prompt has a
+    /// non-rate-limit terminal after it), or produced no prompt.
+    /// `has_in_flight_turn` can't answer this: the rate-limit park emits a
+    /// `Stopped`, so the turn no longer reads as in-flight; here we specifically
+    /// match the rate-limit stop.
+    pub fn rate_limited_turn_prompt(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, Vec<crate::acp::state::PromptAttachmentRef>)> {
         let conn = match self.conn.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -1169,8 +1173,8 @@ impl EventStore {
                 None
             });
         let (prompt_seq, prompt_json) = prompt?;
-        let text = match serde_json::from_str::<Event>(&prompt_json).ok()? {
-            Event::UserPromptSent { text, .. } => text,
+        let (text, attachments) = match serde_json::from_str::<Event>(&prompt_json).ok()? {
+            Event::UserPromptSent { text, attachments } => (text, attachments),
             _ => return None,
         };
         let terminator: Option<String> = conn
@@ -1191,7 +1195,9 @@ impl EventStore {
                 None
             });
         match terminator.and_then(|s| serde_json::from_str::<Event>(&s).ok()) {
-            Some(Event::Stopped { reason }) if reason == "rate_limited" => Some(text),
+            Some(Event::Stopped { reason }) if reason == "rate_limited" => {
+                Some((text, attachments))
+            }
             _ => None,
         }
     }
@@ -2921,7 +2927,44 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.rate_limited_turn_prompt("s-1"),
-            Some("keep working".to_string())
+            Some(("keep working".to_string(), Vec::new()))
+        );
+    }
+
+    // #3028: attachment refs on the interrupted prompt must ride along so the
+    // resume continuation can replay images/files, not just text.
+    #[test]
+    fn rate_limited_turn_prompt_preserves_attachments() {
+        let (_tmp, store) = open_store(1000);
+        let att = crate::acp::state::PromptAttachmentRef {
+            id: "att-1".into(),
+            kind: crate::acp::state::PromptAttachmentKind::Image,
+            mime_type: "image/png".into(),
+            name: Some("shot.png".into()),
+            size: 42,
+        };
+        store
+            .record(
+                "s-1",
+                1,
+                &Event::UserPromptSent {
+                    text: "look at this".into(),
+                    attachments: vec![att.clone()],
+                },
+            )
+            .unwrap();
+        store
+            .record(
+                "s-1",
+                2,
+                &Event::Stopped {
+                    reason: "rate_limited".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store.rate_limited_turn_prompt("s-1"),
+            Some(("look at this".to_string(), vec![att]))
         );
     }
 
