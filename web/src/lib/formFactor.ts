@@ -17,7 +17,7 @@ const matchesMedia = (query: string): boolean =>
 
 /** Installed / standalone PWA: iOS exposes `navigator.standalone`; every other
  *  platform reports `(display-mode: standalone)`. Either counts. */
-const isStandalone = (): boolean => {
+export const isStandalone = (): boolean => {
   if (typeof window === "undefined") return false;
   const ios = (window.navigator as unknown as { standalone?: boolean }).standalone === true;
   return ios || matchesMedia("(display-mode: standalone)");
