@@ -143,3 +143,101 @@ Produce one with `aoe cityhall export --out cityhall.toml` or from the dashboard
 To have a workspace fetch its bundle at startup, set `AOE_CITYHALL_BUNDLE_URL` (and `AOE_CITYHALL_BUNDLE_TOKEN` for the bearer token). The fetch happens before any config is read. On a first boot a fetch failure is fatal, rather than leaving a user in a workspace with no projects; once a bundle has been applied it is cached, and a later failure only warns and serves the cached configuration. A malformed bundle, or one naming an unknown setting, is fatal either way.
 
 A git identity and credential arrive in the same document (`[git]`), which is what makes clone, pull, and push work inside a workspace. `export` never writes that section; the host serving the bundle composes it per user.
+
+### Behind a reverse proxy
+
+When TLS is terminated by an external proxy (Traefik, nginx, Caddy) forwarding to `aoe serve` on loopback (often through an SSH reverse tunnel), use `--behind-proxy` so cookies carry `; Secure` and the rate limiter keys by the real client IP:
+
+```bash
+aoe serve \
+  --host 127.0.0.1 --port 42041 \
+  --auth=passphrase --passphrase "$AOE_PASSPHRASE" \
+  --behind-proxy \
+  --allowed-host aoe.example.com
+```
+
+The upstream must set `X-Forwarded-For` (or `cf-connecting-ip`); aoe reads the last value as the client IP. The trust check fires only when the socket peer is loopback, so a misconfigured upstream that lets requests reach aoe directly cannot spoof the IP.
+
+With `--auth=passphrase --behind-proxy` the passphrase wall applies to loopback callers too. Proxied traffic arrives on a loopback socket, so an upstream that forgets the header would otherwise hand every visitor the same-host bypass. A browser on the same host signs in with the passphrase like any other client, and so does the local TUI and every `aoe acp <verb>` CLI command: they read the daemon's own `serve.passphrase` file to log in via the same `/api/login` handshake and cache the resulting session, the same way they already reuse `serve.token` under `--auth=token`.
+
+`--behind-proxy` requires at least one `--allowed-host <public-hostname>`: aoe cannot infer the hostname your proxy forwards, and the [DNS-rebinding gate](#dns-rebinding) rejects any `Host` it does not recognize. If the proxy listens on a nonstandard port, also pass the exact origin, e.g. `--allowed-origin https://aoe.example.com:8443`. The daemon refuses to start (with an explicit message) if `--behind-proxy` is set without `--allowed-host`.
+
+## Security
+
+**The dashboard exposes terminal access.** Anyone who authenticates can send keystrokes to your agent sessions, which run as your user.
+
+### Authentication
+
+- **Token auth** (`--auth=token`, default): a random 256-bit token, generated on startup and stored at `~/.config/agent-of-empires/serve.token` (Linux) or `~/.agent-of-empires/serve.token` (macOS). Passed via URL on first visit, then kept as an `HttpOnly; SameSite=Strict` cookie.
+- **Passphrase wall** (`--auth=passphrase`, or combined with token via `--passphrase`): an argon2-hashed passphrase gates `/login`. Sessions bind to a per-device secret in `localStorage`, so a leaked cookie alone is insufficient.
+- **Rate limiting**: 5 failed logins from an IP trigger a 15-minute lockout.
+- **Token rotation**: in `--remote` mode the token rotates every 4 hours with a 5-minute grace period for active sessions.
+- **Device tracking**: connected devices (the signed-in login sessions, with browser, origin IP, and last seen) are visible in Settings > Web Dashboard > Connected Devices, where you can revoke one device or sign every device out.
+- **Session persistence**: login sessions are persisted to an owner-only `login_sessions.toml` in the app dir, so signed-in devices survive an `aoe serve` restart instead of being re-prompted for the passphrase. A passphrase change drops every persisted session; set `auth.persist_sessions = false` to force re-authentication on every restart.
+- **Step-up elevation**: a "Confirm passphrase" prompt appears on writes that can plant code for, or widen what is exposed to, the next session spawn. That covers the `sandbox` and `worktree` sections plus individual fields that carry the same risk, currently `acp.restrict_agents`, `skills.auto_propagate`, `session.smart_rename_model`, and `session.inherit_host_environment`; the gate is per field, so the rest of a section saves without it. Confirmation lasts 15 minutes. User-preference writes (theme, sound, notifications, etc.) save without it. Localhost browsers skip the prompt entirely; the same-host caller already passes the filesystem trust boundary. See [Settings & profiles](web/settings.md#step-up-elevation).
+- **Local-only fields**: the agent-command surface and status-hook shell commands map names to arbitrary host commands, so the server rejects any PATCH touching them; they are editable only in the TUI on the host.
+
+The server also sets `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer` (the last prevents token leaks via Referer).
+
+### DNS rebinding
+
+`aoe serve` validates the `Host` and `Origin` of every request before authentication: a request whose `Host` is unlisted, or whose browser `Origin` is present but unlisted, gets `403 Forbidden`. A request with no `Origin` header is exempt from the origin check; any `Origin` that is sent, including the opaque `Origin: null`, is rejected unless allowlisted, and since `--allowed-origin` requires a full `scheme://host[:port]`, `Origin: null` can never be allowlisted. This closes the DNS-rebinding vector: a page that rebinds its hostname to your machine's IP still sends that hostname as `Host`, which is not in the allowlist.
+
+The allowlist is derived automatically:
+
+- `localhost`, `127.0.0.1`, and `::1` are always accepted, plus the value of `--host` when it is a concrete (non-wildcard) address.
+- Any routable **IP literal** `Host`/`Origin` (LAN, tailnet `100.x`, ULA, global) is accepted unconditionally: an IP is dialed directly and never DNS-resolved, so it cannot be rebound. The unspecified address (`0.0.0.0` / `::`), link-local (`169.254.0.0/16`, `fe80::/10`), and multicast are excluded from this automatic trust and cannot be allowlisted at all: `--allowed-host` / `--allowed-origin` reject them at startup, since allowlisting one would reopen the hole the gate closes.
+- `--remote` tunnels (Cloudflare and Tailscale) inject their public hostname and its `https://` origin, so remote dashboards and the live terminal WebSocket work with no extra flag.
+- `--allowed-host` / `--allowed-origin` add operator-declared entries (see below).
+
+A wildcard bind (`--host 0.0.0.0` / `::`) is therefore reachable by its LAN/tailnet **IP** with no extra flag. Only reaching it by a **hostname** (mDNS `.local`, Tailscale MagicDNS name, custom DNS) needs an explicit `--allowed-host`, because a hostname is what a DNS-rebinding attacker controls:
+
+```bash
+# Add a NAME only to reach it by hostname:
+aoe serve --host 0.0.0.0 --allowed-host my-box.tailnet.ts.net
+```
+
+### `--allowed-host` for a reverse proxy or custom tunnel
+
+For a reverse proxy or a manually managed tunnel (anything that is not `--remote`), aoe cannot infer the public hostname, so declare it explicitly. Standard 80/443 origins for each `--allowed-host` are derived automatically; only a proxy on a nonstandard port needs an explicit `--allowed-origin`:
+
+```bash
+# Reverse proxy terminating TLS on the standard 443
+aoe serve --host 127.0.0.1 --behind-proxy --allowed-host aoe.example.com
+
+# Reverse proxy on a nonstandard port
+aoe serve --host 127.0.0.1 --behind-proxy \
+  --allowed-host aoe.example.com \
+  --allowed-origin https://aoe.example.com:8443
+```
+
+Both flags are repeatable and are replayed across `aoe serve --restart`, so a restart preserves the posture.
+
+### Safe usage patterns
+
+- **Localhost** (`aoe serve`): same security as the TUI.
+- **Remote via tunnel** (`aoe serve --remote`): encrypted via HTTPS. Recommended for phone access.
+- **Over Tailscale/WireGuard** (`aoe serve --host 0.0.0.0`): the VPN encrypts traffic; reach it directly at `http://<tailnet-or-lan-ip>:8080`.
+- **Behind a reverse proxy** (`--auth=passphrase --behind-proxy`): TLS terminated upstream; passphrase is the only human gate.
+- **Read-only** (`aoe serve --remote --read-only`): monitor without input.
+
+### Dangerous (blocked)
+
+- `aoe serve --host 0.0.0.0` on public WiFi without a VPN: traffic is unencrypted HTTP.
+- `aoe serve --auth=none --host 0.0.0.0` (or `--no-auth --host 0.0.0.0`): refuses to start without `--behind-proxy`.
+- `aoe serve --auth=none --remote` or `--auth=passphrase --remote`: refuses to start.
+
+## Installing as a PWA
+
+The dashboard installs as a Progressive Web App for an app-like, standalone window:
+
+- **macOS (Chrome)**: three-dot menu > "Install Agent of Empires".
+- **macOS (Safari)**: File > Add to Dock.
+- **iOS**: Share > Add to Home Screen.
+- **Android (Chrome)**: "Add to Home Screen" prompt or install banner.
+
+The PWA needs the server running; use `--daemon` to keep it up (`aoe serve --stop` to stop). For a stable URL that survives restarts, install from a Tailscale Funnel or named-Cloudflare URL, not a quick tunnel.
+
+When you leave the PWA and come back, it reopens to the session you last had open rather than the dashboard. The last session is remembered per device (not synced across devices); if you were on the dashboard when you left, or that session no longer exists, you land on the dashboard.
+
+`Ctrl-C` on a foreground server, or `aoe serve --stop` against a daemon, both exit within ~5 seconds even with open tabs. Live clients receive a `1001` ("going away") close frame and reconnect once a fresh server is running.
