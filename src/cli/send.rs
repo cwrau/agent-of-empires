@@ -3,6 +3,8 @@
 use anyhow::{bail, Result};
 use clap::Args;
 
+use crate::acp::client::http::PromptDispositionWire;
+use crate::acp::client::{require_daemon, HttpClient};
 use crate::session::{EnsureReadyError, EnsureReadyOutcome, Storage};
 
 #[derive(Args)]
@@ -33,6 +35,11 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
     let session_id = inst.id.clone();
     let session_title = inst.title.clone();
     let tool = inst.tool.clone();
+    let is_structured = inst.is_structured();
+
+    if is_structured {
+        return send_structured(&session_id, &session_title, &args.message).await;
+    }
 
     if !args.no_revive {
         if let Some(target) = instances.iter_mut().find(|i| i.id == session_id) {
@@ -89,5 +96,21 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
     }
 
     println!("Sent message to '{}'", session_title);
+    Ok(())
+}
+
+/// ACP/structured-view sessions have no tmux pane; delivering a message means
+/// hitting the running daemon's prompt endpoint instead, the same path the
+/// web composer's send button uses.
+async fn send_structured(session_id: &str, session_title: &str, message: &str) -> Result<()> {
+    let endpoint = require_daemon().await?;
+    let client = HttpClient::new(endpoint)?;
+    let dispatch = client.prompt(session_id, message).await?;
+    let verb = match dispatch.disposition {
+        PromptDispositionWire::Sent => "Sent",
+        PromptDispositionWire::Steered => "Steered into",
+        PromptDispositionWire::Queued => "Queued",
+    };
+    println!("{verb} message to '{session_title}'");
     Ok(())
 }
